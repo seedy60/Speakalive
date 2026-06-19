@@ -87,4 +87,9 @@ void          Engines_ShutdownAll(void);
 #define WM_SA_SAPI5EVENT  (WM_APP + 200)
 void Sapi5_PumpEvents(SpeechEngine *e);
 
+/* OneCore's worker thread posts this to the UI when a rendered WAV is ready to
+ * play; wParam is a heap path (UI takes ownership), lParam is the generation. */
+#define WM_SA_OCPLAY      (WM_APP + 201)
+void OneCore_DoPlay(char *path, long gen);
+
 #endif /* SPEAKALIVE_ENGINE_H */

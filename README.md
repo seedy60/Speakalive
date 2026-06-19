@@ -3,7 +3,7 @@
 The text to speech creator's toolkit that's lightning fast and the size of a pea.
 Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of around 30 KB that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
-Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being Thunderbirds101 and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
+Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
 ## Speakalive features
 
@@ -157,3 +157,8 @@ set "COPYRIGHT=Copyright 2026 Your Name"
 then run `build.bat`. Keep the quotes around the text values, and avoid the characters `&`, `<`, `>`, `|`, and `^` inside them. On each build these variables are written into `src\verinfo.h` (a generated file), which the resource script reads, so you do not edit `verinfo.h` yourself.
 
 To run on Windows 2000, the build does not link the Visual C++ runtime (which does not exist there). Instead it compiles 32-bit with `/NODEFAULTLIB`, supplies its own tiny runtime, patches the executable's subsystem to 5.0, and keeps the import table to DLLs that ship with Windows 2000. Anything newer, such as the WinRT APIs used for OneCore voices and the dark title bar, is loaded at run time, so the same executable still loads on Windows 2000 and simply leaves those features out where the system cannot provide them.
+
+## Known bugs
+
+* Voices are currently listed in a weird order. A planned fix for this is to have them shown in alphabet order like Balabolka.
+* If you accidentally switch to SAPI 4 or OneCore while a SAPI 5 voice is speaking, the program will freeze and promptly crash.

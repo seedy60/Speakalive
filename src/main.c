@@ -54,6 +54,14 @@ static BOOL g_speaking = FALSE;
 static BOOL g_paused   = FALSE;
 static BOOL g_saving   = FALSE;    /* guards re-entry during a file render */
 static BOOL g_webBusy  = FALSE;    /* a web page fetch is in flight        */
+static HWND g_lastFocus = NULL;    /* control to restore focus to on return*/
+
+/* Settings loaded from the registry at start-up. */
+static int  g_haveSettings = 0;
+static int  g_loadRate, g_loadPitch, g_loadVol;
+static int  g_loadDark, g_loadFollowOs;
+static char g_loadEngine[32];
+static char g_loadVoice[256];
 static BOOL g_dark     = FALSE;    /* dark theme active                   */
 static BOOL g_followOs = FALSE;    /* follow the OS light/dark setting     */
 static HBRUSH g_brBg   = NULL;     /* window background brush (dark)       */
@@ -769,6 +777,129 @@ static void ApplyDark(BOOL on)
     }
 }
 
+/* ---- settings persistence (registry) --------------------------------- */
+
+#define SA_REGKEY "Software\\Speakalive"
+
+static void RegSetDword(HKEY k, const char *name, DWORD v)
+{
+    RegSetValueExA(k, name, 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+}
+static DWORD RegGetDword(HKEY k, const char *name, DWORD def)
+{
+    DWORD v = def, sz = sizeof(v), type = 0;
+    if (RegQueryValueExA(k, name, NULL, &type, (BYTE *)&v, &sz) == ERROR_SUCCESS &&
+        type == REG_DWORD)
+        return v;
+    return def;
+}
+static void RegSetStr(HKEY k, const char *name, const char *s)
+{
+    RegSetValueExA(k, name, 0, REG_SZ, (const BYTE *)s, (DWORD)lstrlenA(s) + 1);
+}
+static void RegGetStr(HKEY k, const char *name, char *buf, DWORD len)
+{
+    DWORD sz = len, type = 0;
+    buf[0] = 0;
+    if (RegQueryValueExA(k, name, NULL, &type, (BYTE *)buf, &sz) != ERROR_SUCCESS ||
+        type != REG_SZ)
+        buf[0] = 0;
+    buf[len - 1] = 0;
+}
+static int ClampI(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static void LoadSettings(void)
+{
+    HKEY k;
+    g_loadRate = RATE_DEF; g_loadPitch = PITCH_DEF; g_loadVol = VOL_DEF;
+    g_loadDark = 0; g_loadFollowOs = 1;
+    g_loadEngine[0] = 0; g_loadVoice[0] = 0;
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, SA_REGKEY, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+        return;
+    g_haveSettings = 1;
+    g_xmlMode   = RegGetDword(k, "XmlMode",   (DWORD)g_xmlMode)   ? TRUE : FALSE;
+    g_highlight = RegGetDword(k, "Highlight", (DWORD)g_highlight) ? TRUE : FALSE;
+    g_loadDark     = RegGetDword(k, "Dark", 0)     ? 1 : 0;
+    g_loadFollowOs = RegGetDword(k, "FollowOs", 1) ? 1 : 0;
+    g_loadRate  = ClampI((int)RegGetDword(k, "Rate",   RATE_DEF),  RATE_MIN,  RATE_MAX);
+    g_loadPitch = ClampI((int)RegGetDword(k, "Pitch",  PITCH_DEF), PITCH_MIN, PITCH_MAX);
+    g_loadVol   = ClampI((int)RegGetDword(k, "Volume", VOL_DEF),   VOL_MIN,   VOL_MAX);
+    RegGetStr(k, "Engine", g_loadEngine, sizeof(g_loadEngine));
+    RegGetStr(k, "Voice",  g_loadVoice,  sizeof(g_loadVoice));
+    RegCloseKey(k);
+}
+
+static void SaveSettings(void)
+{
+    HKEY k;
+    WINDOWPLACEMENT wp;
+    int sel;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, SA_REGKEY, 0, NULL, 0, KEY_SET_VALUE,
+                        NULL, &k, NULL) != ERROR_SUCCESS)
+        return;
+    RegSetDword(k, "XmlMode",   (DWORD)(g_xmlMode   ? 1 : 0));
+    RegSetDword(k, "Highlight", (DWORD)(g_highlight ? 1 : 0));
+    RegSetDword(k, "Dark",      (DWORD)(g_dark      ? 1 : 0));
+    RegSetDword(k, "FollowOs",  (DWORD)(g_followOs  ? 1 : 0));
+    RegSetDword(k, "Rate",   (DWORD)TbPos(g_rate));
+    RegSetDword(k, "Pitch",  (DWORD)TbPos(g_pitch));
+    RegSetDword(k, "Volume", (DWORD)TbPos(g_volume));
+    if (g_engine && g_engine->id) RegSetStr(k, "Engine", g_engine->id);
+    sel = (int)SendMessageA(g_voice, CB_GETCURSEL, 0, 0);
+    if (sel >= 0) {
+        int tl = (int)SendMessageA(g_voice, CB_GETLBTEXTLEN, sel, 0);
+        if (tl > 0 && tl < 256) {
+            char vn[256];
+            SendMessageA(g_voice, CB_GETLBTEXT, sel, (LPARAM)vn);
+            RegSetStr(k, "Voice", vn);
+        }
+    }
+    ZeroMemory(&wp, sizeof(wp));
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(g_main, &wp))
+        RegSetValueExA(k, "WindowPlacement", 0, REG_BINARY, (const BYTE *)&wp, sizeof(wp));
+    RegCloseKey(k);
+}
+
+static void SelectVoiceByName(const char *name)
+{
+    int n = (int)SendMessageA(g_voice, CB_GETCOUNT, 0, 0), i;
+    if (!name[0]) return;
+    for (i = 0; i < n; i++) {
+        int tl = (int)SendMessageA(g_voice, CB_GETLBTEXTLEN, i, 0);
+        if (tl > 0 && tl < 256) {
+            char vn[256];
+            SendMessageA(g_voice, CB_GETLBTEXT, i, (LPARAM)vn);
+            if (lstrcmpA(vn, name) == 0) {
+                SendMessageA(g_voice, CB_SETCURSEL, i, 0);
+                if (g_engine && g_engine->SetVoice) g_engine->SetVoice(g_engine, i);
+                return;
+            }
+        }
+    }
+}
+
+static int RestoreWindowPlacement(HWND h)
+{
+    HKEY k;
+    WINDOWPLACEMENT wp;
+    DWORD sz = sizeof(wp), type = 0;
+    int ok = 0;
+    ZeroMemory(&wp, sizeof(wp));
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, SA_REGKEY, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+        return 0;
+    if (RegQueryValueExA(k, "WindowPlacement", NULL, &type, (BYTE *)&wp, &sz) == ERROR_SUCCESS &&
+        type == REG_BINARY && sz == sizeof(wp) && wp.length == sizeof(wp)) {
+        if (wp.showCmd == SW_SHOWMINIMIZED || wp.showCmd == SW_MINIMIZE)
+            wp.showCmd = SW_SHOWNORMAL;        /* never start minimised */
+        SetWindowPlacement(h, &wp);
+        ok = 1;
+    }
+    RegCloseKey(k);
+    return ok;
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -781,6 +912,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_font) g_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
         CreateControls();
+        LoadSettings();
+
+        /* Restore the saved slider positions before SwitchEngine applies them. */
+        SendMessageA(g_rate,   TBM_SETPOS, TRUE, g_loadRate);
+        SendMessageA(g_pitch,  TBM_SETPOS, TRUE, g_loadPitch);
+        SendMessageA(g_volume, TBM_SETPOS, TRUE, g_loadVol);
 
         count = Engines_Count();
         if (count == 0) {
@@ -789,27 +926,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             EnableWindow(g_pause, FALSE);
             EnableWindow(g_stop, FALSE);
         } else {
-            for (i = 0; i < count; i++) {
-                SpeechEngine *e = Engines_Get(i);
-                if (e && e->id && lstrcmpA(e->id, "sapi5") == 0) { def = i; break; }
-            }
+            /* Prefer the saved engine, then SAPI 5, then the first present. */
+            def = -1;
+            if (g_loadEngine[0])
+                for (i = 0; i < count; i++) {
+                    SpeechEngine *e = Engines_Get(i);
+                    if (e && e->id && lstrcmpA(e->id, g_loadEngine) == 0) { def = i; break; }
+                }
+            if (def < 0)
+                for (i = 0; i < count; i++) {
+                    SpeechEngine *e = Engines_Get(i);
+                    if (e && e->id && lstrcmpA(e->id, "sapi5") == 0) { def = i; break; }
+                }
+            if (def < 0) def = 0;
             SendMessageA(g_tab, TCM_SETCURSEL, def, 0);
             SwitchEngine(def);
+            SelectVoiceByName(g_loadVoice);
         }
+
         CheckMenuItem(g_menu, IDM_XML,
                       MF_BYCOMMAND | (g_xmlMode ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_menu, IDM_HIGHLIGHT,
+                      MF_BYCOMMAND | (g_highlight ? MF_CHECKED : MF_UNCHECKED));
 
-        /* Win10/11: follow the OS light/dark setting by default.  "Follow OS
-         * Dark Mode" is only meaningful where the OS has that setting, so it is
-         * disabled (greyed) on older Windows. */
+        /* Dark mode: on Win10/11 follow the OS setting by default (or the saved
+         * choice); on older Windows "Follow OS" is unavailable and the saved
+         * manual state is restored. */
         if (IsWin10Plus()) {
-            g_followOs = TRUE;
-            CheckMenuItem(g_menu, IDM_FOLLOWOS, MF_BYCOMMAND | MF_CHECKED);
+            g_followOs = g_haveSettings ? (g_loadFollowOs ? TRUE : FALSE) : TRUE;
+            CheckMenuItem(g_menu, IDM_FOLLOWOS,
+                          MF_BYCOMMAND | (g_followOs ? MF_CHECKED : MF_UNCHECKED));
         } else {
             g_followOs = FALSE;
             EnableMenuItem(g_menu, IDM_FOLLOWOS, MF_BYCOMMAND | MF_GRAYED);
         }
-        ApplyDark(g_followOs ? ReadOsDark() : FALSE);
+        ApplyDark(g_followOs ? ReadOsDark()
+                             : (g_haveSettings && g_loadDark ? TRUE : FALSE));
 
         SetFocus(g_text);
         return 0;
@@ -817,6 +969,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_SIZE:
         Layout(LOWORD(lp), HIWORD(lp));
+        return 0;
+
+    case WM_ACTIVATE:
+        /* Remember which control had focus when we lose activation, and put it
+         * back when we return (E.G. after Alt+Tab), instead of letting focus
+         * default to an arbitrary control. */
+        if (LOWORD(wp) == WA_INACTIVE) {
+            HWND f = GetFocus();
+            if (f && IsChild(hwnd, f)) g_lastFocus = f;
+        } else if (g_lastFocus && IsWindow(g_lastFocus)) {
+            SetFocus(g_lastFocus);
+        }
         return 0;
 
     case WM_GETMINMAXINFO: {
@@ -944,6 +1108,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SA_SAPI5EVENT:
         Sapi5_PumpEvents(g_engine);
         return 0;
+    case WM_SA_OCPLAY:
+        OneCore_DoPlay((char *)wp, (long)lp);
+        return 0;
     case WM_SA_WORD:
         if (g_highlight) HighlightWord((int)wp, (int)lp);
         return 0;
@@ -979,6 +1146,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_DESTROY:
+        SaveSettings();
         Engines_ShutdownAll();
         if (g_font)  DeleteObject(g_font);
         if (g_brBg)  DeleteObject(g_brBg);
@@ -1027,7 +1195,9 @@ int SpeakaliveMain(void)
                              NULL, g_menu, g_inst, NULL);
     if (!g_main) return 1;
 
-    ShowWindow(g_main, SW_SHOWNORMAL);
+    /* Restore the saved size/position, else show at the default size. */
+    if (!RestoreWindowPlacement(g_main))
+        ShowWindow(g_main, SW_SHOWNORMAL);
     UpdateWindow(g_main);
 
     accel = LoadAcceleratorsA(g_inst, MAKEINTRESOURCEA(IDA_ACCEL));

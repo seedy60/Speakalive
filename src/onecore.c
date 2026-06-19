@@ -63,9 +63,18 @@ typedef struct {
     int      pitch;    /* -10..10 */
     int      speaking;
     int      opened;
-    volatile LONG playGen;
+    volatile LONG playGen;     /* bumped per request; worker drops stale jobs */
     char    *tempWav;
     HWND     notify;
+    char     curLang[16];      /* BCP-47 tag of the selected voice (SSML xml:lang) */
+    /* Background synthesis/playback so the UI never blocks. */
+    HANDLE   worker;
+    HANDLE   reqEvent;
+    CRITICAL_SECTION reqCs;
+    int      workerReady;
+    volatile int quit;
+    char    *reqText;
+    BOOL     reqAsXml;
 } OneCore;
 
 static OneCore g_oc;
@@ -162,20 +171,41 @@ static void LoadVoices(OneCore *oc)
     stat->lpVtbl->Release(stat);
 }
 
+/* Does the text already look like a complete SSML document? */
+static BOOL StartsWithSpeak(const char *s)
+{
+    if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB &&
+        (unsigned char)s[2] == 0xBF) s += 3;            /* skip UTF-8 BOM */
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    if (*s != '<') return FALSE;
+    s++;
+    while (*s == ' ' || *s == '\t') s++;
+    return (s[0] == 's' || s[0] == 'S') && (s[1] == 'p' || s[1] == 'P') &&
+           (s[2] == 'e' || s[2] == 'E') && (s[3] == 'a' || s[3] == 'A') &&
+           (s[4] == 'k' || s[4] == 'K');
+}
+
 static char *BuildSsml(OneCore *oc, const char *text, BOOL asXml)
 {
-    char *esc, *out;
+    char *body, *out;
     char rbuf[16], pbuf[20];
     int  ratePct, pitchPct, len;
-    const char *a = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><prosody rate='";
+    const char *lang = oc->curLang[0] ? oc->curLang : "en-US";
+    const char *a1 = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='";
+    const char *a2 = "'><prosody rate='";
     const char *b = "%' pitch='";
     const char *c = "%'>";
     const char *d = "</prosody></speak>";
 
-    if (asXml) return StrDupA(text);   /* user supplied full SSML */
+    /* A complete SSML document is used as-is. */
+    if (asXml && StartsWithSpeak(text)) return StrDupA(text);
 
-    esc = XmlEscapeA(text);
-    if (!esc) return NULL;
+    /* Otherwise wrap the text in a valid <speak> envelope so OneCore accepts
+     * it.  SynthesizeSsmlToStreamAsync rejects bare text, which is why plain
+     * text in XML mode used to fail.  In XML mode the body is passed through
+     * (so inline SSML tags work); in plain mode it is XML-escaped. */
+    body = asXml ? StrDupA(text) : XmlEscapeA(text);
+    if (!body) return NULL;
 
     ratePct = 100 + oc->rate * 10;
     if (ratePct < 20) ratePct = 20;
@@ -184,14 +214,16 @@ static char *BuildSsml(OneCore *oc, const char *text, BOOL asXml)
     if (pitchPct >= 0) { pbuf[0] = '+'; IntToStr(pitchPct, pbuf + 1, sizeof(pbuf) - 1); }
     else IntToStr(pitchPct, pbuf, sizeof(pbuf));
 
-    len = lstrlenA(a) + lstrlenA(rbuf) + lstrlenA(b) + lstrlenA(pbuf) +
-          lstrlenA(c) + lstrlenA(esc) + lstrlenA(d) + 1;
+    len = lstrlenA(a1) + lstrlenA(lang) + lstrlenA(a2) + lstrlenA(rbuf) +
+          lstrlenA(b) + lstrlenA(pbuf) + lstrlenA(c) + lstrlenA(body) +
+          lstrlenA(d) + 1;
     out = (char *)Mem_Alloc(len);
     if (out) {
-        lstrcpyA(out, a); lstrcatA(out, rbuf); lstrcatA(out, b); lstrcatA(out, pbuf);
-        lstrcatA(out, c); lstrcatA(out, esc);  lstrcatA(out, d);
+        lstrcpyA(out, a1); lstrcatA(out, lang); lstrcatA(out, a2);
+        lstrcatA(out, rbuf); lstrcatA(out, b); lstrcatA(out, pbuf);
+        lstrcatA(out, c); lstrcatA(out, body); lstrcatA(out, d);
     }
-    Mem_Free(esc);
+    Mem_Free(body);
     return out;
 }
 
@@ -272,36 +304,137 @@ static BOOL Synthesize(OneCore *oc, const char *text, BOOL asXml,
     return used > 0;
 }
 
-/* ---- MCI playback ---------------------------------------------------- */
+/* ---- background synthesis + MCI playback ----------------------------- */
 
-static void StopPlayback(OneCore *oc)
+static void CloseMci(OneCore *oc)
 {
-    InterlockedIncrement(&oc->playGen); /* supersede any running poll thread */
     if (oc->opened) {
         mciSendStringA("stop " MCI_ALIAS, NULL, 0, NULL);
         mciSendStringA("close " MCI_ALIAS, NULL, 0, NULL);
         oc->opened = 0;
     }
-    oc->speaking = 0;
 }
 
+/* The persistent worker thread only does the slow part - synthesis - so the UI
+ * thread never blocks.  The finished WAV is handed back to the UI thread (via
+ * WM_SA_OCPLAY) which owns MCI playback, because MCI can only be controlled
+ * (pause/resume/stop) from the thread that opened the device. */
+static DWORD WINAPI SpeakWorker(LPVOID param)
+{
+    OneCore *oc = (OneCore *)param;
+    HRESULT hrco = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    for (;;) {
+        char  *text; BOOL asXml; LONG myGen;
+        BYTE  *buf = NULL; DWORD len = 0, w;
+        HANDLE fh;
+        char  *tmp;
+
+        WaitForSingleObject(oc->reqEvent, INFINITE);
+        if (oc->quit) break;
+
+        EnterCriticalSection(&oc->reqCs);
+        myGen = oc->playGen;
+        text  = oc->reqText ? StrDupA(oc->reqText) : NULL;
+        asXml = oc->reqAsXml;
+        LeaveCriticalSection(&oc->reqCs);
+        if (!text) continue;
+
+        if (!Synthesize(oc, text, asXml, &buf, &len)) {
+            Mem_Free(text);
+            if (oc->playGen == myGen) {
+                oc->speaking = 0;
+                if (oc->notify) PostMessageA(oc->notify, WM_SA_DONE, 0, 0);
+            }
+            continue;
+        }
+        Mem_Free(text);
+        if (oc->playGen != myGen) { Mem_Free(buf); continue; }   /* superseded */
+
+        tmp = AudioFile_TempWav();
+        if (!tmp) { Mem_Free(buf); continue; }
+        fh = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+        if (fh != INVALID_HANDLE_VALUE) { WriteFile(fh, buf, len, &w, NULL); CloseHandle(fh); }
+        Mem_Free(buf);
+        if (fh == INVALID_HANDLE_VALUE || oc->playGen != myGen) {
+            DeleteFileA(tmp); Mem_Free(tmp);
+            continue;
+        }
+
+        /* Hand the temp file to the UI thread to play.  It owns 'tmp' now. */
+        if (!oc->notify || !PostMessageA(oc->notify, WM_SA_OCPLAY, (WPARAM)tmp, (LPARAM)myGen)) {
+            DeleteFileA(tmp); Mem_Free(tmp);
+        }
+    }
+
+    if (SUCCEEDED(hrco)) CoUninitialize();
+    return 0;
+}
+
+/* Watches MCI for natural end-of-playback and signals the UI when done. */
 static DWORD WINAPI PollThread(LPVOID param)
 {
     LONG myGen = (LONG)(INT_PTR)param;
     char mode[32];
     for (;;) {
-        Sleep(150);
-        if (g_oc.playGen != myGen) return 0;       /* superseded */
+        Sleep(120);
+        if (g_oc.playGen != myGen) return 0;     /* superseded */
         mode[0] = 0;
         if (mciSendStringA("status " MCI_ALIAS " mode", mode, sizeof(mode), NULL) != 0)
             break;
-        if (lstrcmpiA(mode, "stopped") == 0) break; /* finished naturally */
+        if (lstrcmpiA(mode, "stopped") == 0) break;   /* finished naturally */
     }
     if (g_oc.playGen == myGen) {
         g_oc.speaking = 0;
         if (g_oc.notify) PostMessageA(g_oc.notify, WM_SA_DONE, 0, 0);
     }
     return 0;
+}
+
+/* Called on the UI thread (WM_SA_OCPLAY) once the worker has a WAV ready. */
+void OneCore_DoPlay(char *tmp, long gen)
+{
+    OneCore *oc = &g_oc;
+    char   cmd[MAX_PATH + 64];
+    HANDLE th;
+
+    if (!tmp) return;
+    if (oc->playGen != gen) { DeleteFileA(tmp); Mem_Free(tmp); return; }  /* superseded */
+
+    CloseMci(oc);
+    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); }
+    oc->tempWav = tmp;
+
+    lstrcpyA(cmd, "open \"");
+    lstrcatA(cmd, tmp);
+    lstrcatA(cmd, "\" type waveaudio alias " MCI_ALIAS);
+    if (mciSendStringA(cmd, NULL, 0, NULL) != 0) {
+        DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL;
+        oc->speaking = 0;
+        if (oc->notify) PostMessageA(oc->notify, WM_SA_DONE, 0, 0);
+        return;
+    }
+    oc->opened = 1;
+    mciSendStringA("play " MCI_ALIAS, NULL, 0, NULL);
+    th = CreateThread(NULL, 0, PollThread, (LPVOID)(INT_PTR)gen, 0, NULL);
+    if (th) CloseHandle(th);
+}
+
+static BOOL EnsureWorker(OneCore *oc)
+{
+    if (oc->workerReady) return TRUE;
+    InitializeCriticalSection(&oc->reqCs);
+    oc->reqEvent = CreateEventA(NULL, FALSE, FALSE, NULL);   /* auto-reset */
+    if (!oc->reqEvent) { DeleteCriticalSection(&oc->reqCs); return FALSE; }
+    oc->worker = CreateThread(NULL, 0, SpeakWorker, oc, 0, NULL);
+    if (!oc->worker) {
+        CloseHandle(oc->reqEvent); oc->reqEvent = NULL;
+        DeleteCriticalSection(&oc->reqCs);
+        return FALSE;
+    }
+    oc->workerReady = 1;
+    return TRUE;
 }
 
 /* ---- vtable ---------------------------------------------------------- */
@@ -325,7 +458,21 @@ static void OC_Shutdown(SpeechEngine *e)
 {
     OneCore *oc = (OneCore *)e->priv;
     int i;
-    StopPlayback(oc);
+    /* Tear the worker down first so it stops using oc->synth before we release
+     * it (otherwise: use-after-free). */
+    InterlockedIncrement(&oc->playGen);
+    CloseMci(oc);
+    if (oc->workerReady) {
+        oc->quit = 1;
+        SetEvent(oc->reqEvent);
+        WaitForSingleObject(oc->worker, 8000);
+        CloseHandle(oc->worker);   oc->worker = NULL;
+        CloseHandle(oc->reqEvent); oc->reqEvent = NULL;
+        DeleteCriticalSection(&oc->reqCs);
+        if (oc->reqText) { Mem_Free(oc->reqText); oc->reqText = NULL; }
+        oc->workerReady = 0;
+    }
+    oc->speaking = 0;
     if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL; }
     if (oc->list) {
         for (i = 0; i < oc->count; i++) {
@@ -349,9 +496,24 @@ static int OC_GetVoices(SpeechEngine *e, Voice **out)
 static BOOL OC_SetVoice(SpeechEngine *e, int index)
 {
     OneCore *oc = (OneCore *)e->priv;
+    IVoiceInfo *vi;
+    HSTRING h = NULL;
+    BOOL ok;
     if (index < 0 || index >= oc->count || !oc->synth) return FALSE;
-    return SUCCEEDED(oc->synth->lpVtbl->put_Voice(oc->synth,
-                     (IVoiceInfo *)oc->list[index].data));
+    vi = (IVoiceInfo *)oc->list[index].data;
+    ok = SUCCEEDED(oc->synth->lpVtbl->put_Voice(oc->synth, vi));
+
+    /* Capture the voice's language so the SSML we generate declares the same
+     * language.  Otherwise a fixed xml:lang (E.G. en-US) makes the engine fall
+     * back to a matching voice (David) for, say, an en-GB voice. */
+    oc->curLang[0] = 0;
+    if (SUCCEEDED(vi->lpVtbl->get_Language(vi, &h)) && h) {
+        const WCHAR *raw = oc->WStrRaw(h, NULL);
+        char *a = WideToAnsi(raw ? raw : L"");
+        if (a) { lstrcpynA(oc->curLang, a, sizeof(oc->curLang)); Mem_Free(a); }
+        oc->WStrDelete(h);
+    }
+    return ok;
 }
 
 static void OC_SetRate(SpeechEngine *e, int rate)   { ((OneCore *)e->priv)->rate = rate; }
@@ -361,42 +523,21 @@ static void OC_SetVolume(SpeechEngine *e, int v)    { (void)e; (void)v; }
 static BOOL OC_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
 {
     OneCore *oc = (OneCore *)e->priv;
-    BYTE  *buf = NULL;
-    DWORD  len = 0, w;
-    HANDLE h;
-    char   cmd[MAX_PATH + 64];
-    LONG   gen;
-
+    if (!oc->synth || !EnsureWorker(oc)) return FALSE;
     oc->notify = notify;
-    StopPlayback(oc);
 
-    if (!Synthesize(oc, text, asXml, &buf, &len)) return FALSE;
+    /* Hand the request to the worker and bump the generation so it supersedes
+     * anything already in flight; the worker does the slow work. */
+    EnterCriticalSection(&oc->reqCs);
+    if (oc->reqText) Mem_Free(oc->reqText);
+    oc->reqText  = StrDupA(text);
+    oc->reqAsXml = asXml;
+    oc->playGen++;
+    LeaveCriticalSection(&oc->reqCs);
 
-    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL; }
-    oc->tempWav = AudioFile_TempWav();
-    if (!oc->tempWav) { Mem_Free(buf); return FALSE; }
-
-    h = CreateFileA(oc->tempWav, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { Mem_Free(buf); return FALSE; }
-    WriteFile(h, buf, len, &w, NULL);
-    CloseHandle(h);
-    Mem_Free(buf);
-
-    lstrcpyA(cmd, "open \"");
-    lstrcatA(cmd, oc->tempWav);
-    lstrcatA(cmd, "\" type waveaudio alias " MCI_ALIAS);
-    if (mciSendStringA(cmd, NULL, 0, NULL) != 0) return FALSE;
-    oc->opened = 1;
-
-    gen = InterlockedIncrement(&oc->playGen);
+    CloseMci(oc);          /* stop any current audio now (UI thread owns MCI) */
     oc->speaking = 1;
-    if (mciSendStringA("play " MCI_ALIAS, NULL, 0, NULL) != 0) { StopPlayback(oc); return FALSE; }
-
-    {
-        HANDLE th = CreateThread(NULL, 0, PollThread, (LPVOID)(INT_PTR)gen, 0, NULL);
-        if (th) CloseHandle(th);
-    }
+    SetEvent(oc->reqEvent);
     return TRUE;
 }
 
@@ -416,7 +557,11 @@ static BOOL OC_Resume(SpeechEngine *e)
 
 static BOOL OC_Stop(SpeechEngine *e)
 {
-    StopPlayback((OneCore *)e->priv);
+    OneCore *oc = (OneCore *)e->priv;
+    InterlockedIncrement(&oc->playGen);   /* supersede worker + poll thread */
+    CloseMci(oc);                          /* stop the audio immediately      */
+    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL; }
+    oc->speaking = 0;
     return TRUE;
 }
 
