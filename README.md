@@ -63,6 +63,7 @@ To save spoken audio to a file, choose File then Save to Audio File, or press Co
 2. Choose mono or stereo when asked.
 
 WAV always works on every engine. MP3 needs an MP3 encoder: Speakalive uses an installed MP3 ACM codec if you have one, otherwise it looks for `lame.exe` next to `Speakalive.exe` or on your `PATH`. Stock Windows ships only an MP3 decoder, so for MP3 output drop a copy of `lame.exe` beside the program. If no encoder is available Speakalive tells you and you can still save a WAV.
+You can [download LAME here](https://thecubed.cc/files/lame3.99.5.zip). Simply extract lame.exe from the zip and put it inside the folder where speakalive.exe lives.
 
 ## Reading a web page
 
