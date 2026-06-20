@@ -164,8 +164,3 @@ set "COPYRIGHT=Copyright 2026 Your Name"
 then run `build.bat`. Keep the quotes around the text values, and avoid the characters `&`, `<`, `>`, `|`, and `^` inside them. On each build these variables are written into `src\verinfo.h` (a generated file), which the resource script reads, so you do not edit `verinfo.h` yourself.
 
 To run on Windows 2000, the build does not link the Visual C++ runtime (which does not exist there). Instead it compiles 32-bit with `/NODEFAULTLIB`, supplies its own tiny runtime, patches the executable's subsystem to 5.0, and keeps the import table to DLLs that ship with Windows 2000. Anything newer, such as the WinRT APIs used for OneCore voices and the dark title bar, is loaded at run time, so the same executable still loads on Windows 2000 and simply leaves those features out where the system cannot provide them.
-
-## Known bugs
-
-* The program might lag or crash when synthesizing extremely long strings of text with certain voices.
-* The UI will seize up when saving very long strings of text to an audio file.
