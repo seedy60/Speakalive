@@ -201,6 +201,9 @@ static BOOL S5_Init(SpeechEngine *e)
     ApplyParams(s);
     LoadVoices(s);
 
+    /* Bind the live output to the voice's own format instead of SAPI's 22 kHz
+     * default, so higher-fidelity voices are not downsampled for playback. */
+    ISpVoice_SetOutput(s->voice, NULL, TRUE);
     ApplyInterest(s);   /* word-boundary events only if highlighting is on */
     return TRUE;
 }
@@ -228,8 +231,12 @@ static BOOL S5_SetVoice(SpeechEngine *e, int index)
 {
     Sapi5 *s = (Sapi5 *)e->priv;
     if (index < 0 || index >= s->count) return FALSE;
-    return SUCCEEDED(ISpVoice_SetVoice(s->voice,
-                     (ISpObjectToken *)s->list[index].data));
+    if (FAILED(ISpVoice_SetVoice(s->voice, (ISpObjectToken *)s->list[index].data)))
+        return FALSE;
+    /* Re-match the live output to this voice's native sample rate (voices
+     * differ); without this SAPI plays everything at its 22 kHz default. */
+    ISpVoice_SetOutput(s->voice, NULL, TRUE);
+    return TRUE;
 }
 
 static void S5_SetRate(SpeechEngine *e, int rate)

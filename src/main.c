@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 
 #include "resource.h"
 #include "engine.h"
@@ -27,9 +28,19 @@
  * used for SAPI 4, and as a fallback if a worker thread cannot be created. */
 #define WM_SA_DORENDER (WM_APP + 302)
 
+/* Callback message for the notification-area icon used to show the "audio
+ * saved" toast (Windows 8+) / balloon (Windows 7 and earlier). */
+#define WM_SA_TRAY     (WM_APP + 303)
+
+/* Posted (not called inline) so the save dialog closes instantly and the toast
+ * - whose Shell_NotifyIcon call can stall briefly - fires afterwards. */
+#define WM_SA_SHOWTOAST (WM_APP + 304)
+
 /* Periodic autosave (crash recovery). */
 #define TIMER_AUTOSAVE   1
 #define AUTOSAVE_MS      10000
+#define TIMER_TRAY       2          /* fallback removal of the tray icon  */
+#define TRAY_MS          30000
 
 /* Slider ranges (normalised inside the engines). */
 #define RATE_MIN   0
@@ -76,6 +87,9 @@ static BOOL g_saving   = FALSE;    /* guards re-entry during a file render */
 static BOOL g_webBusy  = FALSE;    /* a web page fetch is in flight        */
 static HWND g_lastFocus = NULL;    /* control to restore focus to on return*/
 static HWND g_progressDlg = NULL;  /* modeless "Saving Audio" dialog, or NULL  */
+static NOTIFYICONDATAA g_nid;      /* notification-area icon for save toasts   */
+static BOOL g_trayShown = FALSE;   /* the tray icon is currently added         */
+static char g_savedPath[MAX_PATH]; /* file path for the deferred save toast    */
 
 /* A pending audio-file render, owned by the progress dialog and shared with the
  * background render thread.  The dialog frees it once the render reports back. */
@@ -479,6 +493,53 @@ static INT_PTR CALLBACK UrlDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
+/* Remove the transient save-notification tray icon if it is showing. */
+static void RemoveTrayIcon(void)
+{
+    if (g_trayShown) {
+        KillTimer(g_main, TIMER_TRAY);
+        Shell_NotifyIconA(NIM_DELETE, &g_nid);
+        g_trayShown = FALSE;
+    }
+}
+
+/* Announce a successful save without a modal dialog.  We add a notification-
+ * area icon and fire a balloon: the shell shows it as a toast on Windows 8+ and
+ * as a classic balloon on Windows 7 down to 2000.  The icon removes itself when
+ * the balloon is dismissed (WM_SA_TRAY) or after TRAY_MS as a backstop. */
+static void ShowSaveNotification(const char *path)
+{
+    const char *fn = path, *p;
+    char info[300];
+
+    for (p = path; *p; p++) if (*p == '\\' || *p == '/') fn = p + 1;
+    wsprintfA(info, "Audio saved: %s", fn);
+
+    ZeroMemory(&g_nid, sizeof(g_nid));
+    /* Built with _WIN32_WINNT=0x0500, so NOTIFYICONDATAA is the Win2000 (V2)
+     * layout - sizeof is the balloon-capable V2 size the shell expects. */
+    g_nid.cbSize           = sizeof(g_nid);
+    g_nid.hWnd             = g_main;
+    g_nid.uID              = 1;
+    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_SA_TRAY;
+    g_nid.hIcon            = LoadIconA(NULL, (LPCSTR)IDI_APPLICATION);
+    lstrcpynA(g_nid.szTip, APP_TITLE, sizeof(g_nid.szTip));
+
+    if (!g_trayShown) {
+        if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) return;   /* no shell tray */
+        g_trayShown = TRUE;
+    }
+
+    g_nid.uFlags      = NIF_INFO;
+    g_nid.dwInfoFlags = NIIF_INFO;
+    lstrcpynA(g_nid.szInfoTitle, APP_TITLE, sizeof(g_nid.szInfoTitle));
+    lstrcpynA(g_nid.szInfo, info, sizeof(g_nid.szInfo));
+    Shell_NotifyIconA(NIM_MODIFY, &g_nid);
+
+    SetTimer(g_main, TIMER_TRAY, TRAY_MS, NULL);
+}
+
 /* "Saving Audio" progress dialog.  It owns the SaveReq, kicks off the render
  * (on a worker thread, or inline on the UI thread for SAPI 4), animates a
  * native progress bar, and dismisses itself - returning the success flag -
@@ -579,8 +640,10 @@ static INT_PTR CALLBACK ProgressDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             SetStatus("Save cancelled");
         } else if (ok) {
             SetStatus("Audio saved");
-            MessageBoxA(g_main, "Audio file saved successfully.", APP_TITLE,
-                        MB_OK | MB_ICONINFORMATION);
+            /* Defer the toast: posting it lets this handler return and the
+             * dialog tear down immediately, instead of stalling on the shell. */
+            lstrcpynA(g_savedPath, path, MAX_PATH);
+            PostMessageA(g_main, WM_SA_SHOWTOAST, 0, 0);
         } else {
             SetStatus("Save failed");
             MessageBoxA(g_main,
@@ -1297,6 +1360,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_TIMER:
         if (wp == TIMER_AUTOSAVE && g_dirty) AutoSave();
+        if (wp == TIMER_TRAY) RemoveTrayIcon();   /* balloon backstop timeout */
+        return 0;
+
+    case WM_SA_SHOWTOAST:
+        ShowSaveNotification(g_savedPath);  /* off the save-completion path */
+        return 0;
+
+    case WM_SA_TRAY:
+        /* The save toast/balloon was dismissed or timed out - drop the icon. */
+        if (LOWORD(lp) == NIN_BALLOONTIMEOUT ||
+            LOWORD(lp) == NIN_BALLOONHIDE ||
+            LOWORD(lp) == NIN_BALLOONUSERCLICK)
+            RemoveTrayIcon();
         return 0;
 
     case WM_SIZE:
@@ -1520,6 +1596,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY: {
         char path[MAX_PATH];
         KillTimer(hwnd, TIMER_AUTOSAVE);
+        RemoveTrayIcon();
         SaveSettings();
         /* A clean exit means there is nothing to recover next time. */
         if (GetRecoverPath(path, sizeof(path))) DeleteFileA(path);
