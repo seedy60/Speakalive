@@ -17,4 +17,14 @@ BOOL  AudioFile_WavToMp3(const char *wavPath, const char *mp3Path);
 BOOL  AudioFile_WavBytesToFile(const BYTE *wav, DWORD len, const char *path,
                                int fmt, int channels);
 
+/* Read a WAV file and return a heap copy of its PCM samples plus the format.
+ * Used to stitch several rendered chunks together.  Free *pcm with Mem_Free. */
+BOOL  AudioFile_ReadWavPcm(const char *path, BYTE **pcm, DWORD *pcmLen,
+                           WAVEFORMATEX *fmt);
+
+/* Write raw PCM (with the given format) to 'path' as FMT_WAV/FMT_MP3 and the
+ * requested channel count, reusing the normal mono->stereo / MP3 path. */
+BOOL  AudioFile_PcmToFile(const BYTE *pcm, DWORD pcmLen, const WAVEFORMATEX *fmt,
+                          const char *path, int outFmt, int channels);
+
 #endif /* SPEAKALIVE_AUDIOFILE_H */

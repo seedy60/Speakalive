@@ -76,6 +76,10 @@ SpeechEngine *Engines_Get(int index);             /* 0..count-1               */
 int           Engines_Count(void);
 void          Engines_ShutdownAll(void);
 
+/* Set non-zero to ask an in-progress SaveToFile() to stop early.  Engines poll
+ * this in their render loops and return FALSE when it is raised. */
+extern volatile long g_saveCancel;
+
 /* Notifications sent to the UI's notify window. */
 #define WM_SA_BASE        (WM_APP + 100)
 #define WM_SA_WORD        (WM_SA_BASE + 0)  /* wParam=start, lParam=length     */
@@ -85,11 +89,20 @@ void          Engines_ShutdownAll(void);
 /* Private message SAPI 5 posts to the UI when speech events are queued.
  * The UI forwards it straight back to the engine via Sapi5_PumpEvents(). */
 #define WM_SA_SAPI5EVENT  (WM_APP + 200)
-void Sapi5_PumpEvents(SpeechEngine *e);
+void Sapi5_PumpEvents(void);
+
+/* Ask the SAPI 5 voice for word-boundary events only when needed (the highlight
+ * feature).  Some voices crash generating them, so they are off by default. */
+void Sapi5_SetWordHighlight(BOOL on);
 
 /* OneCore's worker thread posts this to the UI when a rendered WAV is ready to
  * play; wParam is a heap path (UI takes ownership), lParam is the generation. */
 #define WM_SA_OCPLAY      (WM_APP + 201)
 void OneCore_DoPlay(char *path, long gen);
+
+/* SAPI 4's chunk-completion sink posts this to the UI so the next chunk of a
+ * long utterance is fed on the UI thread; wParam is the speak generation. */
+#define WM_SA_S4NEXT      (WM_APP + 202)
+void Sapi4_SpeakNextChunk(long gen);
 
 #endif /* SPEAKALIVE_ENGINE_H */

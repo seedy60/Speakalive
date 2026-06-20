@@ -5,6 +5,7 @@
  *     rc /dSA_FILE_DESC="\"My Build\"" /dSA_VER_MAJOR=2 ...
  * The #ifndef guards mean rc also compiles standalone with the defaults. */
 #include <windows.h>
+#include <commctrl.h>
 #include "resource.h"
 
 /* ---- version / metadata --------------------------------------------- */
@@ -58,6 +59,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "&Save Text...\tCtrl+S",              IDM_SAVETEXT
         MENUITEM "Save to &Audio File...\tCtrl+Shift+S", IDM_SAVE
+        MENUITEM "Save Audio in S&tereo",              IDM_STEREO
         MENUITEM SEPARATOR
         MENUITEM "E&xit\tAlt+F4",                      IDM_EXIT
     END
@@ -106,6 +108,20 @@ BEGIN
     EDITTEXT        IDC_URLEDIT, 7, 20, 272, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "OK", IDOK, 172, 45, 50, 14, BS_OWNERDRAW | WS_TABSTOP
     PUSHBUTTON      "Cancel", IDCANCEL, 229, 45, 50, 14, BS_OWNERDRAW | WS_TABSTOP
+END
+
+/* Shown (modeless) while the engine renders the text to an audio file.  The
+ * main window stays enabled so a screen reader can still read it; Cancel aborts
+ * the render. */
+IDD_PROGRESS DIALOGEX 0, 0, 240, 74
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_VISIBLE
+CAPTION "Saving Audio"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT      "Saving audio, please wait...", IDC_PROGRESSLBL, 10, 9, 220, 18
+    CONTROL    "", IDC_PROGRESSBAR, "msctls_progress32",
+               PBS_SMOOTH | WS_CHILD | WS_VISIBLE, 10, 31, 220, 12
+    PUSHBUTTON "Cancel", IDCANCEL, 95, 52, 50, 14, BS_OWNERDRAW | WS_TABSTOP
 END
 
 1 VERSIONINFO

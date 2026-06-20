@@ -1,7 +1,8 @@
 # Speakalive
 
-The text to speech creator's toolkit that's lightning fast and the size of a pea.
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of around 30 KB that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
+
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of about 39 KB that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
@@ -58,10 +59,7 @@ With Speak as XML / SSML turned off, your text is read out exactly as written an
 ## Saving audio
 
 To save spoken audio to a file, choose File then Save to Audio File, or press Control + Shift + S.
-
-1. Pick a location and filename, and choose WAV or MP3 from the file type box (or just type the extension you want).
-2. Choose mono or stereo when asked.
-
+Pick a location and filename, and choose WAV or MP3 from the file type box (or just type the extension you want).
 WAV always works on every engine. MP3 needs an MP3 encoder: Speakalive uses an installed MP3 ACM codec if you have one, otherwise it looks for `lame.exe` next to `Speakalive.exe` or on your `PATH`. Stock Windows ships only an MP3 decoder, so for MP3 output drop a copy of `lame.exe` beside the program. If no encoder is available Speakalive tells you and you can still save a WAV.
 You can [download LAME here](https://thecubed.cc/files/lame3.99.5.zip). Simply extract lame.exe from the zip and put it inside the folder where speakalive.exe lives.
 
@@ -79,6 +77,14 @@ The page is downloaded with the system's own internet settings, so it works thro
 ## Saving your text
 
 To save the text you have written to a plain text file, choose File then Save Text, or press Control + S. Pick a location and filename in the file picker and Speakalive writes your text to a `.txt` file.
+
+## Auto save
+
+With Speakonia, Balabolka or pretty much any other TTS software out there, be it vintage or modern, you have no insurance when the program crashes or Windows decides to freeze on you.
+
+Speakalive includes an automatic save feature that means your work is always protected. In the event of a program crash, blue screen of death, power outage, mutant spider invasion or some other unexplained event, relaunching Speakalive will trigger a dialog asking if you want to recover the file you were working on. Hit yes and your text will reappear exactly as you left it before that transformer near your house decided it didn't wanna be hear anymore.
+
+Furthermore, if you quit the program without saving your text, you will be asked if you want to save before exiting, so you're protected from closing the program by accident.
 
 ## Dark mode
 
@@ -161,5 +167,5 @@ To run on Windows 2000, the build does not link the Visual C++ runtime (which do
 
 ## Known bugs
 
-* Voices are currently listed in a weird order. A planned fix for this is to have them shown in alphabet order like Balabolka.
-* If you accidentally switch to SAPI 4 or OneCore while a SAPI 5 voice is speaking, the program will freeze and promptly crash.
+* The program might lag or crash when synthesizing extremely long strings of text with certain voices.
+* The UI will seize up when saving very long strings of text to an audio file.

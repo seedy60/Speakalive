@@ -39,6 +39,7 @@
 #define IDM_NEXTENGINE  2013
 #define IDM_PREVENGINE  2014
 #define IDM_WEBPAGE     2015
+#define IDM_STEREO      2016
 
 /* ---- Resources ---- */
 #define IDA_ACCEL       3001
@@ -49,5 +50,10 @@
 #define IDD_URL         6001
 #define IDC_URLLABEL    6002
 #define IDC_URLEDIT     6003
+
+/* ---- "Saving Audio" progress dialog ---- */
+#define IDD_PROGRESS    6004
+#define IDC_PROGRESSLBL 6005
+#define IDC_PROGRESSBAR 6006
 
 #endif /* SPEAKALIVE_RESOURCE_H */

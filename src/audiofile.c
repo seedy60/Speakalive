@@ -328,3 +328,45 @@ BOOL AudioFile_WavBytesToFile(const BYTE *wav, DWORD len, const char *path,
     if (tmp) { DeleteFileA(tmp); Mem_Free(tmp); }
     return ok;
 }
+
+BOOL AudioFile_ReadWavPcm(const char *path, BYTE **pcm, DWORD *pcmLen,
+                          WAVEFORMATEX *fmt)
+{
+    WavData w;
+    BYTE   *copy;
+    *pcm = NULL; *pcmLen = 0;
+    ZeroMemory(fmt, sizeof(*fmt));
+    if (!WavRead(path, &w)) return FALSE;
+    copy = (BYTE *)Mem_Alloc(w.dataLen ? w.dataLen : 1);
+    if (!copy) { WavFree(&w); return FALSE; }
+    memcpy(copy, w.data, w.dataLen);
+    *pcm = copy; *pcmLen = w.dataLen; *fmt = w.fmt;
+    WavFree(&w);
+    return TRUE;
+}
+
+BOOL AudioFile_PcmToFile(const BYTE *pcm, DWORD pcmLen, const WAVEFORMATEX *fmt,
+                         const char *path, int outFmt, int channels)
+{
+    BYTE *wav;
+    BOOL  ok;
+    WORD  ch    = fmt->nChannels   ? fmt->nChannels   : 1;
+    DWORD rate  = fmt->nSamplesPerSec ? fmt->nSamplesPerSec : 22050;
+    WORD  bits  = fmt->wBitsPerSample ? fmt->wBitsPerSample : 16;
+    WORD  align = (WORD)(ch * (bits / 8));
+
+    wav = (BYTE *)Mem_Alloc((SIZE_T)44 + pcmLen);
+    if (!wav) return FALSE;
+    memcpy(wav, "RIFF", 4);          wr32(wav + 4, 36 + pcmLen);
+    memcpy(wav + 8, "WAVE", 4);
+    memcpy(wav + 12, "fmt ", 4);     wr32(wav + 16, 16);
+    wr16(wav + 20, 1);               wr16(wav + 22, ch);
+    wr32(wav + 24, rate);            wr32(wav + 28, rate * align);
+    wr16(wav + 32, align);           wr16(wav + 34, bits);
+    memcpy(wav + 36, "data", 4);     wr32(wav + 40, pcmLen);
+    memcpy(wav + 44, pcm, pcmLen);
+
+    ok = AudioFile_WavBytesToFile(wav, 44 + pcmLen, path, outFmt, channels);
+    Mem_Free(wav);
+    return ok;
+}

@@ -2,6 +2,10 @@
  * running system and expose them as an ordered list for the UI's tabs. */
 #include "engine.h"
 
+/* Raised by the UI (the Cancel button) to abort an in-progress SaveToFile
+ * render; each engine polls it inside its render loop. */
+volatile long g_saveCancel = 0;
+
 static SpeechEngine *g_list[4];
 static int           g_count;
 

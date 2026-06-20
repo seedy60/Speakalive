@@ -28,7 +28,26 @@ typedef struct {
 
 static Sapi5 g_s5;
 
+/* Word-boundary events are only needed for the "highlight spoken word" feature
+ * (off by default).  Some third-party voices crash while generating them, so we
+ * only ask for them when highlighting is actually on. */
+static BOOL g_s5WordEvents = FALSE;
+
 /* ---- helpers ---------------------------------------------------------- */
+
+static void ApplyInterest(Sapi5 *s)
+{
+    ULONGLONG m = SPFEI(SPEI_START_INPUT_STREAM) | SPFEI(SPEI_END_INPUT_STREAM);
+    if (g_s5WordEvents) m |= SPFEI(SPEI_WORD_BOUNDARY);
+    if (s->voice) ISpVoice_SetInterest(s->voice, m, m);
+}
+
+/* Called by the UI when the highlight option changes (also at start-up). */
+void Sapi5_SetWordHighlight(BOOL on)
+{
+    g_s5WordEvents = on ? TRUE : FALSE;
+    ApplyInterest(&g_s5);
+}
 
 static void FreeVoices(Sapi5 *s)
 {
@@ -130,6 +149,21 @@ static WCHAR *BuildSpeakString(Sapi5 *s, const char *text, BOOL asXml)
     return wide;
 }
 
+/* Build the wide string to speak and choose the SAPI flag.  XML parsing is only
+ * used when it is actually needed - the user typed markup, or a pitch tag has
+ * to be injected.  Plain text is spoken as plain text (SPF_IS_NOT_XML), because
+ * some voices are unstable in XML mode (e.g. they crash on word boundaries). */
+static WCHAR *BuildSpeak(Sapi5 *s, const char *text, BOOL asXml, DWORD *flag)
+{
+    if (asXml || s->pitch != 0) {
+        *flag = SPF_IS_XML;
+        return BuildSpeakString(s, text, asXml);   /* escaped body + pitch tag */
+    }
+    *flag = SPF_IS_NOT_XML;
+    s->prefixLen = 0;
+    return AnsiToWide(text);                        /* literal, unparsed text  */
+}
+
 static void ApplyParams(Sapi5 *s)
 {
     if (!s->voice) return;
@@ -167,11 +201,7 @@ static BOOL S5_Init(SpeechEngine *e)
     ApplyParams(s);
     LoadVoices(s);
 
-    ISpVoice_SetInterest(s->voice,
-        SPFEI(SPEI_WORD_BOUNDARY) | SPFEI(SPEI_END_INPUT_STREAM) |
-        SPFEI(SPEI_START_INPUT_STREAM),
-        SPFEI(SPEI_WORD_BOUNDARY) | SPFEI(SPEI_END_INPUT_STREAM) |
-        SPFEI(SPEI_START_INPUT_STREAM));
+    ApplyInterest(s);   /* word-boundary events only if highlighting is on */
     return TRUE;
 }
 
@@ -227,18 +257,20 @@ static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     WCHAR *wide;
     HRESULT hr;
 
+    DWORD xmlFlag;
+
     if (!s->voice) return FALSE;
     s->notify = notify;
     if (notify)
         ISpVoice_SetNotifyWindowMessage(s->voice, notify, WM_SA_SAPI5EVENT, 0, 0);
 
     ApplyParams(s);
-    wide = BuildSpeakString(s, text, asXml);
+    wide = BuildSpeak(s, text, asXml, &xmlFlag);
     if (!wide) return FALSE;
 
     s->speaking = 1;
     hr = ISpVoice_Speak(s->voice, wide,
-                        SPF_ASYNC | SPF_IS_XML | SPF_PURGEBEFORESPEAK, NULL);
+                        SPF_ASYNC | xmlFlag | SPF_PURGEBEFORESPEAK, NULL);
     Mem_Free(wide);
     if (FAILED(hr)) { s->speaking = 0; return FALSE; }
     return TRUE;
@@ -283,6 +315,7 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
     char        *wavPath;
     const char  *renderPath;
     HRESULT      hr;
+    DWORD        xmlFlag;
     BOOL         ok = FALSE;
 
     if (!s->voice) return FALSE;
@@ -316,11 +349,23 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
         if (SUCCEEDED(hr)) {
             ISpVoice_SetOutput(s->voice, (IUnknown *)stream, TRUE);
             ApplyParams(s);
-            wide = BuildSpeakString(s, text, asXml);
+            wide = BuildSpeak(s, text, asXml, &xmlFlag);
             if (wide) {
-                hr = ISpVoice_Speak(s->voice, wide, SPF_IS_XML, NULL); /* sync */
+                /* Render asynchronously and wait, polling g_saveCancel, so a
+                 * long render can be cancelled.  A synchronous Speak could not
+                 * be interrupted (a cross-thread purge does not stop it). */
+                hr = ISpVoice_Speak(s->voice, wide, xmlFlag | SPF_ASYNC, NULL);
                 Mem_Free(wide);
-                ok = SUCCEEDED(hr);
+                if (SUCCEEDED(hr)) {
+                    while (ISpVoice_WaitUntilDone(s->voice, 100) == S_FALSE) {
+                        if (g_saveCancel) {
+                            ISpVoice_Speak(s->voice, NULL,
+                                           SPF_PURGEBEFORESPEAK, NULL); /* abort */
+                            break;
+                        }
+                    }
+                    ok = !g_saveCancel;
+                }
             }
             ISpVoice_SetOutput(s->voice, NULL, TRUE); /* back to speakers */
         }
@@ -340,12 +385,13 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
 
 /* Called by the UI when WM_SA_SAPI5EVENT arrives: drain queued events and
  * translate word boundaries into highlight notifications. */
-void Sapi5_PumpEvents(SpeechEngine *e)
+void Sapi5_PumpEvents(void)
 {
-    Sapi5  *s = (Sapi5 *)(e ? e->priv : &g_s5);
+    Sapi5  *s = &g_s5;   /* always the SAPI 5 singleton - the current engine may
+                          * have changed since this event was posted */
     SPEVENT ev;
     ULONG   fetched;
-    if (!s || !s->voice) return;
+    if (!s->voice) return;
 
     while (ISpVoice_GetEvents(s->voice, 1, &ev, &fetched) == S_OK && fetched == 1) {
         switch (ev.eEventId) {

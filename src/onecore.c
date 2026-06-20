@@ -262,6 +262,12 @@ static BOOL Synthesize(OneCore *oc, const char *text, BOOL asXml,
     if (SUCCEEDED(op->lpVtbl->QueryInterface(op, &GUID_IAsyncInfo, (void **)&info)) && info) {
         for (;;) {
             AsyncStatus st = (AsyncStatus)0;
+            if (g_saveCancel) {            /* user pressed Cancel */
+                info->lpVtbl->Cancel(info);
+                info->lpVtbl->Release(info);
+                op->lpVtbl->Release(op);
+                return FALSE;
+            }
             info->lpVtbl->get_Status(info, &st);
             if (st == 1) break;            /* Completed */
             if (st >= 2) {                 /* Canceled / Error */

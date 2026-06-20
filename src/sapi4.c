@@ -77,25 +77,6 @@ static struct ITTSNotifySinkWVtbl g_sinkVtbl = {
 };
 static ITTSNotifySinkW g_sink = { &g_sinkVtbl };
 
-static BOOL ReadFileAll(const char *path, BYTE **outBuf, DWORD *outLen)
-{
-    HANDLE h;
-    DWORD  sz, got;
-    BYTE  *b;
-    *outBuf = NULL; *outLen = 0;
-    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return FALSE;
-    sz = GetFileSize(h, NULL);
-    if (sz == INVALID_FILE_SIZE || sz == 0) { CloseHandle(h); return FALSE; }
-    b = (BYTE *)Mem_Alloc(sz);
-    if (!b) { CloseHandle(h); return FALSE; }
-    if (!ReadFile(h, b, sz, &got, NULL) || got != sz) { CloseHandle(h); Mem_Free(b); return FALSE; }
-    CloseHandle(h);
-    *outBuf = b; *outLen = sz;
-    return TRUE;
-}
-
 #define S4_MAXVOICES 64
 
 typedef struct {
@@ -111,11 +92,56 @@ typedef struct {
     int     rate;     /* -10..10 */
     int     pitch;    /* -10..10 */
     int     speaking;
-    int     curVoice; /* index currently selected */
-    WCHAR  *lastBuf;  /* kept alive while the async engine reads it */
+    int     curVoice;   /* index currently selected */
+    /* Live (F5) chunked speaking: the text is fed to the engine one chunk at a
+     * time, the next queued when the previous finishes (SAPI 4 chokes on one
+     * huge buffer). */
+    WCHAR  *speakText;  /* full text being spoken (heap, owned)            */
+    WCHAR  *speakChunk; /* reusable per-chunk buffer                       */
+    int     speakPos;   /* next char offset into speakText                 */
+    int     speakTotal;
+    HWND    speakNotify;
+    long    speakGen;   /* bumped on Stop / new Speak to drop stale callbacks */
+    DWORD   speakRegKey;
+    int     speakSinkReg;
 } Sapi4;
 
 static Sapi4 g_s4;
+
+/* --- chunking shared by live speech and the file render --- */
+#define S4_CHUNK_CHARS 4000
+
+/* Length (in WCHARs) of the chunk at w[start]: at most 'max', broken at the
+ * last sentence end (or space) so words are never split. */
+static int S4_ChunkLen(const WCHAR *w, int start, int total, int max)
+{
+    int i, lastBreak = -1, lastSpace = -1;
+    if (total - start <= max) return total - start;
+    for (i = 0; i < max; i++) {
+        WCHAR c = w[start + i];
+        if (c == L'.' || c == L'!' || c == L'?' || c == L'\n') lastBreak = i;
+        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') lastSpace = i;
+    }
+    if (lastBreak >= 0) return lastBreak + 1;
+    if (lastSpace >= 0) return lastSpace + 1;
+    return max;
+}
+
+/* Notify sink for live speech: each finished chunk posts WM_SA_S4NEXT so the
+ * UI thread can feed the next one (SAPI 4 objects have thread affinity, so the
+ * feed must happen on the thread that created the central). */
+static HRESULT STDMETHODCALLTYPE Sink_AudioStop_Speak(ITTSNotifySinkW *This, QWORD q)
+{
+    (void)This; (void)q;
+    if (g_s4.speakNotify)
+        PostMessageA(g_s4.speakNotify, WM_SA_S4NEXT, (WPARAM)g_s4.speakGen, 0);
+    return S_OK;
+}
+static struct ITTSNotifySinkWVtbl g_speakSinkVtbl = {
+    Sink_QI, Sink_AddRef, Sink_Release,
+    Sink_AttribChanged, Sink_AudioStart, Sink_AudioStop_Speak, Sink_Visual
+};
+static ITTSNotifySinkW g_speakSink = { &g_speakSinkVtbl };
 
 static void ApplyParamsTo(Sapi4 *s, ITTSAttributesW *a)
 {
@@ -142,6 +168,10 @@ static void ApplyParams(Sapi4 *s) { ApplyParamsTo(s, s->attr); }
 
 static void ReleaseSelection(Sapi4 *s)
 {
+    if (s->speakSinkReg && s->central) {
+        s->central->lpVtbl->UnRegister(s->central, s->speakRegKey);
+        s->speakSinkReg = 0;
+    }
     if (s->attr)    { s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
     if (s->central) { s->central->lpVtbl->Release(s->central); s->central = NULL; }
     if (s->audio)   { s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
@@ -169,6 +199,10 @@ static BOOL DoSelect(Sapi4 *s, int index)
         if (FAILED(s->attr->lpVtbl->PitchGet(s->attr, &s->defPitch))) s->defPitch = 100;
         s->attr->lpVtbl->VolumeSet(s->attr, 0xFFFFFFFF); /* full volume */
     }
+    /* Listen for chunk completions so we can queue the next chunk. */
+    if (SUCCEEDED(s->central->lpVtbl->Register(s->central, (PVOID)&g_speakSink,
+                  GUID_ITTSNotifySinkW, &s->speakRegKey)))
+        s->speakSinkReg = 1;
     ApplyParams(s);
     return TRUE;
 }
@@ -218,9 +252,12 @@ static void S4_Shutdown(SpeechEngine *eng)
 {
     Sapi4 *s = (Sapi4 *)eng->priv;
     if (s->central) s->central->lpVtbl->AudioReset(s->central);
+    s->speaking = 0;
+    s->speakGen++;
     ReleaseSelection(s);
     if (s->enumr) { s->enumr->lpVtbl->Release(s->enumr); s->enumr = NULL; }
-    if (s->lastBuf) { Mem_Free(s->lastBuf); s->lastBuf = NULL; }
+    if (s->speakText)  { Mem_Free(s->speakText);  s->speakText = NULL; }
+    if (s->speakChunk) { Mem_Free(s->speakChunk); s->speakChunk = NULL; }
     s->count = 0;
 }
 
@@ -250,31 +287,70 @@ static void S4_SetPitch(SpeechEngine *eng, int pitch)
 
 static void S4_SetVolume(SpeechEngine *eng, int v) { (void)eng; (void)v; }
 
+/* Feed the chunk at speakPos (or finish if there is none left).  Runs on the
+ * UI thread - from S4_Speak for the first chunk and from Sapi4_SpeakNextChunk
+ * (via WM_SA_S4NEXT) for the rest. */
+static void S4_FeedChunk(Sapi4 *s)
+{
+    int   clen;
+    SDATA d;
+
+    if (!s->central || !s->speakText) return;
+
+    if (s->speakPos >= s->speakTotal) {            /* whole text spoken */
+        s->speaking = 0;
+        Mem_Free(s->speakText); s->speakText = NULL;
+        if (s->speakNotify) PostMessageA(s->speakNotify, WM_SA_DONE, 0, 0);
+        return;
+    }
+
+    clen = S4_ChunkLen(s->speakText, s->speakPos, s->speakTotal, S4_CHUNK_CHARS);
+    memcpy(s->speakChunk, s->speakText + s->speakPos, (SIZE_T)clen * sizeof(WCHAR));
+    s->speakChunk[clen] = 0;
+    s->speakPos += clen;
+
+    d.pData  = s->speakChunk;
+    d.dwSize = (DWORD)((clen + 1) * sizeof(WCHAR));
+    if (FAILED(s->central->lpVtbl->TextData(s->central, CHARSET_TEXT,
+              TTSDATAFLAG_TAGGED, d, NULL, GUID_ITTSBufNotifySink))) {
+        s->speaking = 0;
+        Mem_Free(s->speakText); s->speakText = NULL;
+        if (s->speakNotify) PostMessageA(s->speakNotify, WM_SA_DONE, 0, 0);
+    }
+}
+
 static BOOL S4_Speak(SpeechEngine *eng, const char *text, BOOL asXml, HWND notify)
 {
     Sapi4 *s = (Sapi4 *)eng->priv;
     WCHAR *w;
-    SDATA  d;
-    HRESULT hr;
-    (void)asXml; (void)notify;
+    (void)asXml;
 
     if (!s->central) return FALSE;
     w = AnsiToWide(text);
     if (!w) return FALSE;
+    if (!s->speakChunk) {
+        s->speakChunk = (WCHAR *)Mem_Alloc((S4_CHUNK_CHARS + 1) * sizeof(WCHAR));
+        if (!s->speakChunk) { Mem_Free(w); return FALSE; }
+    }
 
-    /* Stop anything in progress, then it is safe to free the old buffer. */
-    s->central->lpVtbl->AudioReset(s->central);
-    if (s->lastBuf) { Mem_Free(s->lastBuf); s->lastBuf = NULL; }
-
-    d.pData  = w;
-    d.dwSize = (DWORD)((lstrlenW(w) + 1) * sizeof(WCHAR));
-    hr = s->central->lpVtbl->TextData(s->central, CHARSET_TEXT, TTSDATAFLAG_TAGGED,
-                                      d, NULL, GUID_ITTSBufNotifySink);
-    if (FAILED(hr)) { Mem_Free(w); return FALSE; }
-
-    s->lastBuf = w;   /* keep alive until next Speak/Stop/Shutdown */
-    s->speaking = 1;
+    s->central->lpVtbl->AudioReset(s->central);  /* stop anything in progress */
+    s->speakGen++;                               /* drop stale chunk callbacks */
+    if (s->speakText) Mem_Free(s->speakText);
+    s->speakText   = w;
+    s->speakPos    = 0;
+    s->speakTotal  = lstrlenW(w);
+    s->speakNotify = notify;
+    s->speaking    = 1;
+    S4_FeedChunk(s);                             /* kick off the first chunk  */
     return TRUE;
+}
+
+/* Called by the UI (WM_SA_S4NEXT) when a chunk finishes; queues the next one.
+ * 'gen' rejects callbacks left over from a Stop or a replaced utterance. */
+void Sapi4_SpeakNextChunk(long gen)
+{
+    Sapi4 *s = &g_s4;
+    if (s->speaking && gen == s->speakGen) S4_FeedChunk(s);
 }
 
 static BOOL S4_Pause(SpeechEngine *eng)
@@ -294,72 +370,57 @@ static BOOL S4_Stop(SpeechEngine *eng)
     Sapi4 *s = (Sapi4 *)eng->priv;
     if (!s->central) return FALSE;
     s->speaking = 0;
+    s->speakGen++;                               /* drop pending chunk callbacks */
+    if (s->speakText) { Mem_Free(s->speakText); s->speakText = NULL; }
     return SUCCEEDED(s->central->lpVtbl->AudioReset(s->central));
 }
 
 static BOOL S4_IsSpeaking(SpeechEngine *eng) { return ((Sapi4 *)eng->priv)->speaking; }
 
-/* Render to a file via the built-in CLSID_AudioDestFile.  We always render a
- * temporary WAV (the engine writes its native mono PCM), then hand it to
- * audiofile.c which produces the requested format / channel count. */
-static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
-                    const char *path, int fmt, int channels)
+/* SAPI 4 (the old L&H engine) lags badly or fails outright when handed a very
+ * long buffer in a single TextData call, so the file render also feeds it in
+ * bite-sized chunks (S4_ChunkLen, above) and stitches the PCM together. */
+
+/* Render one (null-terminated) chunk to 'wtmp'.  FALSE on error or cancel. */
+static BOOL S4_RenderChunk(Sapi4 *s, const WCHAR *wchunk, DWORD byteSize,
+                           WCHAR *wtmp)
 {
-    Sapi4           *s = (Sapi4 *)eng->priv;
     IAudioFile      *pIAF = NULL;
     ITTSCentralW    *fileCentral = NULL;
     ITTSAttributesW *fileAttr = NULL;
-    WCHAR           *wtext = NULL, *wtmp = NULL;
-    char            *tmpWav = NULL;
-    BYTE            *buf = NULL;
-    DWORD            len = 0, regKey = 0;
+    DWORD            regKey = 0;
     BOOL             ok = FALSE;
     SDATA            d;
-    (void)asXml;
-
-    if (!s->enumr || s->count <= 0) return FALSE;
-
-    tmpWav = AudioFile_TempWav();
-    if (!tmpWav) return FALSE;
-    wtmp  = AnsiToWide(tmpWav);
-    wtext = AnsiToWide(text);
-    if (!wtmp || !wtext) goto done;
 
     if (FAILED(CoCreateInstance(&GUID_AudioDestFile, NULL, CLSCTX_ALL,
                                 &GUID_IAudioFile, (void **)&pIAF)) || !pIAF)
         goto done;
-
-    /* A separate Select binds a fresh central to the file destination,
-     * leaving the live speaker central untouched. */
     if (FAILED(s->enumr->lpVtbl->Select(s->enumr, s->modes[s->curVoice],
                                         &fileCentral, (LPUNKNOWN)pIAF)) || !fileCentral)
         goto done;
-
     if (SUCCEEDED(fileCentral->lpVtbl->QueryInterface(fileCentral,
                   &GUID_ITTSAttributesW, (void **)&fileAttr)) && fileAttr)
         ApplyParamsTo(s, fileAttr);
 
     pIAF->lpVtbl->RealTimeSet(pIAF, 0x0800);   /* render up to 8x real time   */
-
     g_audioStopped = 0;
     fileCentral->lpVtbl->Register(fileCentral, (PVOID)&g_sink,
                                   GUID_ITTSNotifySinkW, &regKey);
-
     if (FAILED(pIAF->lpVtbl->Set(pIAF, wtmp, 1))) goto done;
 
-    d.pData  = wtext;
-    d.dwSize = (DWORD)((lstrlenW(wtext) + 1) * sizeof(WCHAR));
+    d.pData  = (PVOID)wchunk;
+    d.dwSize = byteSize;
     if (FAILED(fileCentral->lpVtbl->TextData(fileCentral, CHARSET_TEXT,
               TTSDATAFLAG_TAGGED, d, NULL, GUID_ITTSBufNotifySink)))
         goto done;
 
-    /* Wait for the render to finish.  The engine delivers AudioStop either
-     * from its own thread or via this STA's message queue, so do both: pump
-     * messages and poll the flag. */
+    /* Wait for this chunk to finish.  AudioStop arrives from the engine thread
+     * or this STA's queue, so pump messages and poll the flag. */
     {
         DWORD start = GetTickCount();
         while (!g_audioStopped) {
             MSG msg;
+            if (g_saveCancel) { fileCentral->lpVtbl->AudioReset(fileCentral); goto done; }
             while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
                 TranslateMessage(&msg);
                 DispatchMessageA(&msg);
@@ -368,18 +429,76 @@ static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
             Sleep(5);
         }
     }
-
-    pIAF->lpVtbl->Flush(pIAF);                  /* finalise the .wav           */
-    if (regKey) fileCentral->lpVtbl->UnRegister(fileCentral, regKey);
-
-    if (ReadFileAll(tmpWav, &buf, &len) && len > 0)
-        ok = AudioFile_WavBytesToFile(buf, len, path, fmt, channels);
+    pIAF->lpVtbl->Flush(pIAF);                  /* finalise the chunk .wav     */
+    ok = !g_saveCancel;
 
 done:
-    Mem_Free(buf);
+    if (regKey && fileCentral) fileCentral->lpVtbl->UnRegister(fileCentral, regKey);
     if (fileAttr)    fileAttr->lpVtbl->Release(fileAttr);
     if (fileCentral) fileCentral->lpVtbl->Release(fileCentral);
     if (pIAF)        pIAF->lpVtbl->Release(pIAF);
+    return ok;
+}
+
+static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
+                    const char *path, int fmt, int channels)
+{
+    Sapi4 *s = (Sapi4 *)eng->priv;
+    WCHAR *wtext = NULL, *wtmp = NULL, *chunkBuf = NULL;
+    char  *tmpWav = NULL;
+    BYTE  *pcmAll = NULL;
+    DWORD  pcmCap = 0, pcmLen = 0;
+    WAVEFORMATEX wf;
+    BOOL   haveFmt = FALSE, ok = FALSE;
+    int    total, pos;
+    (void)asXml;
+
+    if (!s->enumr || s->count <= 0) return FALSE;
+
+    wtext  = AnsiToWide(text);
+    tmpWav = AudioFile_TempWav();
+    if (!wtext || !tmpWav) goto done;
+    wtmp     = AnsiToWide(tmpWav);
+    chunkBuf = (WCHAR *)Mem_Alloc((S4_CHUNK_CHARS + 1) * sizeof(WCHAR));
+    if (!wtmp || !chunkBuf) goto done;
+
+    total = lstrlenW(wtext);
+
+    for (pos = 0; pos < total; ) {
+        int   clen = S4_ChunkLen(wtext, pos, total, S4_CHUNK_CHARS);
+        BYTE *cpcm = NULL;
+        DWORD cpcmLen = 0;
+        WAVEFORMATEX cwf;
+
+        memcpy(chunkBuf, wtext + pos, (SIZE_T)clen * sizeof(WCHAR));
+        chunkBuf[clen] = 0;
+
+        if (!S4_RenderChunk(s, chunkBuf, (DWORD)((clen + 1) * sizeof(WCHAR)), wtmp))
+            goto done;     /* error or cancel */
+        if (!AudioFile_ReadWavPcm(tmpWav, &cpcm, &cpcmLen, &cwf))
+            goto done;
+        if (!haveFmt) { wf = cwf; haveFmt = TRUE; }
+
+        if (pcmLen + cpcmLen > pcmCap) {
+            DWORD need = pcmLen + cpcmLen, ncap = pcmCap ? pcmCap : (1u << 20);
+            while (ncap < need) ncap *= 2;
+            pcmAll = (BYTE *)Mem_ReAlloc(pcmAll, ncap);
+            if (!pcmAll) { Mem_Free(cpcm); goto done; }
+            pcmCap = ncap;
+        }
+        memcpy(pcmAll + pcmLen, cpcm, cpcmLen);
+        pcmLen += cpcmLen;
+        Mem_Free(cpcm);
+
+        pos += clen;
+    }
+
+    if (haveFmt && pcmLen > 0)
+        ok = AudioFile_PcmToFile(pcmAll, pcmLen, &wf, path, fmt, channels);
+
+done:
+    Mem_Free(pcmAll);
+    if (chunkBuf) Mem_Free(chunkBuf);
     if (wtext) Mem_Free(wtext);
     if (wtmp)  Mem_Free(wtmp);
     if (tmpWav) { DeleteFileA(tmpWav); Mem_Free(tmpWav); }
