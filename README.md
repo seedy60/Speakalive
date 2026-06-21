@@ -6,6 +6,10 @@ Speakalive is a lightweight, fully accessible text-to-speech program for Windows
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
+## Versioning
+
+Speakalive is a retro style program through and through. To show commitment to the bit, releases have a 2022.x.x version number.
+
 ## Speakalive features
 
 Speakalive speaks your text through whichever speech engines are installed on your computer: SAPI 4, SAPI 5, and the modern Windows OneCore voices on Windows 10 and 11. Each engine gets its own tab, and only the engines you actually have are shown, so the program automatically fits the machine it is running on. You can choose any installed voice, adjust the speaking rate and pitch (and the volume on SAPI 5), and start, pause, and stop the speech with single keypresses. You can save what you hear to a WAV or MP3 file in mono or stereo, and save the text you have written to a plain text file. Speakalive understands SAPI 4 control tags and SAPI 5 XML / SSML markup, so you can fine-tune pronunciation, emphasis, and timing right inside your text. A dark mode follows your Windows theme on Windows 10 and 11 and can be switched on by hand on older systems.
