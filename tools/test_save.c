@@ -53,6 +53,16 @@ void __cdecl WinMainCRTStartup(void)
             ok = oc->SaveToFile(oc, "OneCore stereo.", FALSE,
                                 "C:\\git\\Speakalive\\build\\test_oc_stereo.wav", FMT_WAV, 2);
             Out(ok ? "OneCore WAV stereo: OK\n" : "OneCore WAV stereo: FAIL\n");
+            /* The bug: plain text with asXml=TRUE used to fail (bare text is
+             * not valid SSML).  Should now succeed (wrapped in <speak>). */
+            ok = oc->SaveToFile(oc, "Plain text but XML mode is on.", TRUE,
+                                "C:\\git\\Speakalive\\build\\test_oc_xml.wav", FMT_WAV, 1);
+            Out(ok ? "OneCore XML+plaintext: OK\n" : "OneCore XML+plaintext: FAIL\n");
+            /* A real SSML document should still work as-is. */
+            ok = oc->SaveToFile(oc,
+                "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>full ssml</speak>",
+                TRUE, "C:\\git\\Speakalive\\build\\test_oc_ssml.wav", FMT_WAV, 1);
+            Out(ok ? "OneCore full-SSML: OK\n" : "OneCore full-SSML: FAIL\n");
             oc->Shutdown(oc);
         }
     }

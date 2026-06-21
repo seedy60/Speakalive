@@ -23,6 +23,7 @@ typedef struct {
     int       vol;      /* 0..100  */
     int       speaking;
     int       prefixLen;/* wchars of injected <pitch> markup, for offset fix */
+    int       outputIsSpeaker; /* live speaker output bound at the voice rate  */
     HWND      notify;
 } Sapi5;
 
@@ -201,9 +202,10 @@ static BOOL S5_Init(SpeechEngine *e)
     ApplyParams(s);
     LoadVoices(s);
 
-    /* Bind the live output to the voice's own format instead of SAPI's 22 kHz
-     * default, so higher-fidelity voices are not downsampled for playback. */
-    ISpVoice_SetOutput(s->voice, NULL, TRUE);
+    /* The live speaker output is bound lazily, on the first Speak (see S5_Speak),
+     * so neither start-up, voice changes, nor file saves pay to reopen the audio
+     * device - which is slow for voices with an unusual native sample rate. */
+    s->outputIsSpeaker = 0;
     ApplyInterest(s);   /* word-boundary events only if highlighting is on */
     return TRUE;
 }
@@ -233,9 +235,9 @@ static BOOL S5_SetVoice(SpeechEngine *e, int index)
     if (index < 0 || index >= s->count) return FALSE;
     if (FAILED(ISpVoice_SetVoice(s->voice, (ISpObjectToken *)s->list[index].data)))
         return FALSE;
-    /* Re-match the live output to this voice's native sample rate (voices
-     * differ); without this SAPI plays everything at its 22 kHz default. */
-    ISpVoice_SetOutput(s->voice, NULL, TRUE);
+    /* The new voice may have a different native rate; rebind the output on the
+     * next Speak rather than reopening the audio device here. */
+    s->outputIsSpeaker = 0;
     return TRUE;
 }
 
@@ -270,6 +272,14 @@ static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     s->notify = notify;
     if (notify)
         ISpVoice_SetNotifyWindowMessage(s->voice, notify, WM_SA_SAPI5EVENT, 0, 0);
+
+    /* Bind the speaker output at the voice's native rate now (the device open
+     * that a file save deliberately skips).  Only when not already bound, so
+     * back-to-back speaks don't keep reopening the device. */
+    if (!s->outputIsSpeaker) {
+        ISpVoice_SetOutput(s->voice, NULL, TRUE);
+        s->outputIsSpeaker = 1;
+    }
 
     ApplyParams(s);
     wide = BuildSpeak(s, text, asXml, &xmlFlag);
@@ -355,6 +365,7 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
                                   &SPDFID_WaveFormatEx, &wfx, 0);
         if (SUCCEEDED(hr)) {
             ISpVoice_SetOutput(s->voice, (IUnknown *)stream, TRUE);
+            s->outputIsSpeaker = 0;   /* next live Speak rebinds the speakers */
             ApplyParams(s);
             wide = BuildSpeak(s, text, asXml, &xmlFlag);
             if (wide) {
@@ -374,7 +385,9 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
                     ok = !g_saveCancel;
                 }
             }
-            ISpVoice_SetOutput(s->voice, NULL, TRUE); /* back to speakers */
+            /* Deliberately NOT reverting the output to the speakers here: that
+             * reopens the audio device (slow for some voices) and would stall
+             * the end of the save.  The next live Speak rebinds it instead. */
         }
         ISpStream_Close(stream);
         ISpStream_Release(stream);

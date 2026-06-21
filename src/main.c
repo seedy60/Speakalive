@@ -90,6 +90,7 @@ static HWND g_progressDlg = NULL;  /* modeless "Saving Audio" dialog, or NULL  *
 static NOTIFYICONDATAA g_nid;      /* notification-area icon for save toasts   */
 static BOOL g_trayShown = FALSE;   /* the tray icon is currently added         */
 static char g_savedPath[MAX_PATH]; /* file path for the deferred save toast    */
+static DWORD g_saveStartTick;      /* for the time-based save progress curve   */
 
 /* A pending audio-file render, owned by the progress dialog and shared with the
  * background render thread.  The dialog frees it once the render reports back. */
@@ -570,6 +571,7 @@ static INT_PTR CALLBACK ProgressDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             SendDlgItemMessageA(dlg, IDC_PROGRESSBAR, PBM_SETBARCOLOR, 0, (LPARAM)RGB(38, 160, 218));
         }
         SetTitleBarDark(dlg, g_dark);
+        g_saveStartTick = GetTickCount();
         SetTimer(dlg, PROGRESS_TIMER, 90, NULL);
         SetActiveWindow(dlg);
         SetFocus(GetDlgItem(dlg, IDCANCEL));   /* so NVDA announces the dialog */
@@ -598,14 +600,15 @@ static INT_PTR CALLBACK ProgressDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
 
     case WM_TIMER:
         if (wp == PROGRESS_TIMER) {
-            /* No engine reports real progress, so ease the bar toward 95% to
-             * show ongoing work; WM_SA_SAVEDONE snaps it to 100%. */
-            int pos = (int)SendDlgItemMessageA(dlg, IDC_PROGRESSBAR, PBM_GETPOS, 0, 0);
-            if (pos < 95) {
-                pos += (95 - pos) / 8 + 1;
-                if (pos > 95) pos = 95;
-                SendDlgItemMessageA(dlg, IDC_PROGRESSBAR, PBM_SETPOS, pos, 0);
-            }
+            /* SAPI exposes no synthesis progress for a file render, so the bar
+             * is time-based: it ramps smoothly to 90% over ~10s and then keeps
+             * creeping toward 98%, so it never freezes at a cap and read as a
+             * hang during a slow voice's render.  WM_SA_SAVEDONE snaps to 100%. */
+            DWORD elapsed = GetTickCount() - g_saveStartTick;
+            int   pos;
+            if (elapsed < 10000) pos = (int)(elapsed * 90 / 10000);
+            else { pos = 90 + (int)((elapsed - 10000) / 2000); if (pos > 98) pos = 98; }
+            SendDlgItemMessageA(dlg, IDC_PROGRESSBAR, PBM_SETPOS, pos, 0);
         }
         return TRUE;
 

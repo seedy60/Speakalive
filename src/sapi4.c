@@ -9,9 +9,11 @@
  * Speech parameters come from ITTSAttributesW; SAPI 4 control tags in the
  * text are honoured via TTSDATAFLAG_TAGGED.
  *
- * NOTE: this engine could not be exercised on the Windows 11 build machine
- * (no SAPI 4 runtime present there).  It is detection-gated, so it is inert
- * unless a real SAPI 4 engine is installed.  Validate on SAPI 4 hardware.
+ * NOTE: the build machine now has SAPI 4 runtimes (Microsoft Sam, L&H voices),
+ * so this engine can be exercised here directly - the tools/test_s4*.c console
+ * harnesses drive it (render speed, and the concurrency-safety check that proved
+ * the L&H engine must be rendered serially).  It stays detection-gated, so it is
+ * inert on systems with no SAPI 4 engine installed.
  */
 #include <windows.h>
 #include "speech.h"
@@ -47,9 +49,7 @@ static const GUID GUID_ITTSNotifySinkW =
 static const GUID GUID_IUnknownLocal =
     {0x00000000,0x0000,0x0000,{0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 
-/* ---- ITTSNotifySink callback object (file-render completion) --------- */
-
-static volatile LONG g_audioStopped;
+/* ---- ITTSNotifySink callbacks (shared by the live-speak and file sinks) - */
 
 static HRESULT STDMETHODCALLTYPE Sink_QI(ITTSNotifySinkW *This, REFIID riid, void **ppv)
 {
@@ -65,17 +65,9 @@ static HRESULT STDMETHODCALLTYPE Sink_AttribChanged(ITTSNotifySinkW *This, DWORD
 { (void)This; (void)d; return S_OK; }
 static HRESULT STDMETHODCALLTYPE Sink_AudioStart(ITTSNotifySinkW *This, QWORD q)
 { (void)This; (void)q; return S_OK; }
-static HRESULT STDMETHODCALLTYPE Sink_AudioStop(ITTSNotifySinkW *This, QWORD q)
-{ (void)This; (void)q; InterlockedExchange(&g_audioStopped, 1); return S_OK; }
 static HRESULT STDMETHODCALLTYPE Sink_Visual(ITTSNotifySinkW *This, QWORD q,
         WCHAR a, WCHAR b, DWORD d, PTTSMOUTH m)
 { (void)This; (void)q; (void)a; (void)b; (void)d; (void)m; return S_OK; }
-
-static struct ITTSNotifySinkWVtbl g_sinkVtbl = {
-    Sink_QI, Sink_AddRef, Sink_Release,
-    Sink_AttribChanged, Sink_AudioStart, Sink_AudioStop, Sink_Visual
-};
-static ITTSNotifySinkW g_sink = { &g_sinkVtbl };
 
 #define S4_MAXVOICES 64
 
@@ -89,6 +81,8 @@ typedef struct {
     int     count;
     DWORD   defSpeed;
     WORD    defPitch;
+    DWORD   speedMin, speedMax;   /* the engine's real accepted speed range */
+    WORD    pitchMin, pitchMax;   /* the engine's real accepted pitch range */
     int     rate;     /* -10..10 */
     int     pitch;    /* -10..10 */
     int     speaking;
@@ -143,25 +137,76 @@ static struct ITTSNotifySinkWVtbl g_speakSinkVtbl = {
 };
 static ITTSNotifySinkW g_speakSink = { &g_speakSinkVtbl };
 
+/* SAPI 4 Set() REJECTS an out-of-range speed/pitch (it returns failure and
+ * leaves the value unchanged) rather than clamping, and every voice has its own
+ * range - e.g. L&H Peter accepts pitch up to 337 where Michelle stops at 190.
+ * These probes binary-search the largest/smallest value Set still accepts, so
+ * the sliders can span each voice's true range (matching what Balabolka reaches
+ * at the extremes) instead of a fixed default-relative guess that fell short.
+ * 'kind' 0 = speed, 1 = pitch. */
+static BOOL S4_TrySet(ITTSAttributesW *a, int kind, DWORD v)
+{
+    return kind == 0 ? SUCCEEDED(a->lpVtbl->SpeedSet(a, v))
+                     : SUCCEEDED(a->lpVtbl->PitchSet(a, (WORD)v));
+}
+static DWORD S4_ProbeHi(ITTSAttributesW *a, int kind, DWORD def, DWORD cap)
+{
+    DWORD lo = def, hi = cap;                 /* def is accepted; cap may not be */
+    while (lo < hi) { DWORD mid = lo + (hi - lo + 1) / 2;
+        if (S4_TrySet(a, kind, mid)) lo = mid; else hi = mid - 1; }
+    return lo;
+}
+static DWORD S4_ProbeLo(ITTSAttributesW *a, int kind, DWORD def)
+{
+    DWORD lo = 1, hi = def;                    /* def is accepted; 1 may not be  */
+    while (lo < hi) { DWORD mid = lo + (hi - lo) / 2;
+        if (S4_TrySet(a, kind, mid)) hi = mid; else lo = mid + 1; }
+    return hi;
+}
+
+/* Map the -10..10 sliders onto the voice's real range: 0 = default, +10 = the
+ * engine's max, -10 = its min (linear on each side).  Falls back to the old
+ * default-relative formula if a range has not been probed (speedMax stays 0). */
+static void S4_MapParams(Sapi4 *s, DWORD *speed, WORD *pitch)
+{
+    DWORD dS = s->defSpeed ? s->defSpeed : 150;
+    DWORD dP = s->defPitch ? s->defPitch : 100;
+    long  v;
+
+    /* A nonzero min means the range was probed (see DoSelect).  Each slider half
+     * is handled independently, so a voice with headroom on only one side (its
+     * min == default, say) still reaches its max on the other. */
+    if (s->speedMin) {
+        if (s->rate >= 0)
+            v = s->speedMax > dS ? (long)dS + (long)(s->speedMax - dS) *  s->rate / 10 : (long)dS;
+        else
+            v = s->speedMin < dS ? (long)dS - (long)(dS - s->speedMin) * (-s->rate) / 10 : (long)dS;
+    } else {
+        long step = (long)dS / 10; if (step < 1) step = 1;
+        v = (long)dS + (long)s->rate * step;
+    }
+    if (v < 1) v = 1;
+    *speed = (DWORD)v;
+
+    if (s->pitchMin) {
+        if (s->pitch >= 0)
+            v = s->pitchMax > dP ? (long)dP + (long)(s->pitchMax - dP) *  s->pitch / 10 : (long)dP;
+        else
+            v = s->pitchMin < dP ? (long)dP - (long)(dP - s->pitchMin) * (-s->pitch) / 10 : (long)dP;
+    } else {
+        v = (long)dP + (long)s->pitch * 5;
+    }
+    if (v < 1) v = 1; if (v > 0xFFFF) v = 0xFFFF;
+    *pitch = (WORD)v;
+}
+
 static void ApplyParamsTo(Sapi4 *s, ITTSAttributesW *a)
 {
+    DWORD speed; WORD pitch;
     if (!a) return;
-    {
-        int base = (int)s->defSpeed, step;
-        if (base <= 0) base = 150;
-        step = base / 10; if (step < 1) step = 1;
-        base = base + s->rate * step;
-        if (base < 1) base = 1;
-        a->lpVtbl->SpeedSet(a, (DWORD)base);
-    }
-    {
-        int base = (int)s->defPitch;
-        if (base <= 0) base = 100;
-        base = base + s->pitch * 5;
-        if (base < 1) base = 1;
-        if (base > 0xFFFF) base = 0xFFFF;
-        a->lpVtbl->PitchSet(a, (WORD)base);
-    }
+    S4_MapParams(s, &speed, &pitch);
+    a->lpVtbl->SpeedSet(a, speed);
+    a->lpVtbl->PitchSet(a, pitch);
 }
 
 static void ApplyParams(Sapi4 *s) { ApplyParamsTo(s, s->attr); }
@@ -175,6 +220,8 @@ static void ReleaseSelection(Sapi4 *s)
     if (s->attr)    { s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
     if (s->central) { s->central->lpVtbl->Release(s->central); s->central = NULL; }
     if (s->audio)   { s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
+    s->speedMin = s->speedMax = 0;   /* re-probed per voice in DoSelect */
+    s->pitchMin = s->pitchMax = 0;
 }
 
 static BOOL DoSelect(Sapi4 *s, int index)
@@ -198,6 +245,15 @@ static BOOL DoSelect(Sapi4 *s, int index)
         if (FAILED(s->attr->lpVtbl->SpeedGet(s->attr, &s->defSpeed))) s->defSpeed = 150;
         if (FAILED(s->attr->lpVtbl->PitchGet(s->attr, &s->defPitch))) s->defPitch = 100;
         s->attr->lpVtbl->VolumeSet(s->attr, 0xFFFFFFFF); /* full volume */
+        /* Discover this voice's true speed/pitch limits so the sliders reach
+         * the engine's real extremes (see S4_ProbeHi).  Restore the defaults
+         * afterwards - ApplyParams below sets the slider-driven values. */
+        s->speedMax = S4_ProbeHi(s->attr, 0, s->defSpeed, 2000);
+        s->speedMin = S4_ProbeLo(s->attr, 0, s->defSpeed);
+        s->pitchMax = (WORD)S4_ProbeHi(s->attr, 1, s->defPitch, 0xFFFF);
+        s->pitchMin = (WORD)S4_ProbeLo(s->attr, 1, s->defPitch);
+        s->attr->lpVtbl->SpeedSet(s->attr, s->defSpeed);
+        s->attr->lpVtbl->PitchSet(s->attr, s->defPitch);
     }
     /* Listen for chunk completions so we can queue the next chunk. */
     if (SUCCEEDED(s->central->lpVtbl->Register(s->central, (PVOID)&g_speakSink,
@@ -378,68 +434,102 @@ static BOOL S4_Stop(SpeechEngine *eng)
 static BOOL S4_IsSpeaking(SpeechEngine *eng) { return ((Sapi4 *)eng->priv)->speaking; }
 
 /* SAPI 4 (the old L&H engine) lags badly or fails outright when handed a very
- * long buffer in a single TextData call, so the file render also feeds it in
- * bite-sized chunks (S4_ChunkLen, above) and stitches the PCM together. */
+ * long buffer in a single TextData call, so a long file save is fed to it in
+ * bite-sized chunks (S4_ChunkLen, above) and the PCM stitched back together.
+ * The chunks are rendered strictly one at a time: the L&H runtime is not
+ * thread-safe and corrupts the audio if instances render concurrently (it does
+ * run them concurrently without erroring - tools/test_s4par.c - but the output
+ * is wrong: tools/test_s4safe.c).  Its shared state is per-process, so rendering
+ * chunks in separate helper processes IS safe and fast (tools/test_s4proc.c),
+ * but that was judged not worth the extra moving parts.  RealTimeSet(0xFFFF)
+ * below is the real speed win for fast voices; genuinely slow voices stay
+ * engine-bound, as in Balabolka. */
 
-/* Render one (null-terminated) chunk to 'wtmp'.  FALSE on error or cancel. */
-static BOOL S4_RenderChunk(Sapi4 *s, const WCHAR *wchunk, DWORD byteSize,
-                           WCHAR *wtmp)
+/* Per-render completion sink.  The COM object is the first member, so the
+ * 'This' handed to the callbacks casts straight back to the S4Sink and each
+ * render gets its own 'stopped' flag (clearer than a global, and ready should a
+ * future SAPI 4 engine ever prove safe to parallelise). */
+typedef struct { ITTSNotifySinkW sink; volatile LONG stopped; } S4Sink;
+static HRESULT STDMETHODCALLTYPE Sink_AudioStop_File(ITTSNotifySinkW *This, QWORD q)
+{ (void)q; InterlockedExchange(&((S4Sink *)This)->stopped, 1); return S_OK; }
+static struct ITTSNotifySinkWVtbl g_fileSinkVtbl = {
+    Sink_QI, Sink_AddRef, Sink_Release,
+    Sink_AttribChanged, Sink_AudioStart, Sink_AudioStop_File, Sink_Visual
+};
+
+/* Render one null-terminated chunk to 'wtmp' using the caller's enumerator.
+ * Creates its own central, file destination and sink per call.  Called serially
+ * (see S4_Save).  FALSE on error or cancel. */
+static BOOL S4_RenderChunk(ITTSEnumW *en, GUID mode, DWORD speed, WORD pitch,
+                           const WCHAR *chunk, const WCHAR *wtmp)
 {
     IAudioFile      *pIAF = NULL;
-    ITTSCentralW    *fileCentral = NULL;
-    ITTSAttributesW *fileAttr = NULL;
-    DWORD            regKey = 0;
+    ITTSCentralW    *fc   = NULL;
+    ITTSAttributesW *at   = NULL;
+    DWORD            regKey = 0, start;
     BOOL             ok = FALSE;
+    S4Sink           sink;
     SDATA            d;
+    MSG              msg;
+
+    sink.sink.lpVtbl = &g_fileSinkVtbl;
+    sink.stopped     = 0;
 
     if (FAILED(CoCreateInstance(&GUID_AudioDestFile, NULL, CLSCTX_ALL,
                                 &GUID_IAudioFile, (void **)&pIAF)) || !pIAF)
+        return FALSE;
+    if (FAILED(en->lpVtbl->Select(en, mode, &fc, (LPUNKNOWN)pIAF)) || !fc)
         goto done;
-    if (FAILED(s->enumr->lpVtbl->Select(s->enumr, s->modes[s->curVoice],
-                                        &fileCentral, (LPUNKNOWN)pIAF)) || !fileCentral)
-        goto done;
-    if (SUCCEEDED(fileCentral->lpVtbl->QueryInterface(fileCentral,
-                  &GUID_ITTSAttributesW, (void **)&fileAttr)) && fileAttr)
-        ApplyParamsTo(s, fileAttr);
-
-    pIAF->lpVtbl->RealTimeSet(pIAF, 0x0800);   /* render up to 8x real time   */
-    g_audioStopped = 0;
-    fileCentral->lpVtbl->Register(fileCentral, (PVOID)&g_sink,
-                                  GUID_ITTSNotifySinkW, &regKey);
-    if (FAILED(pIAF->lpVtbl->Set(pIAF, wtmp, 1))) goto done;
-
-    d.pData  = (PVOID)wchunk;
-    d.dwSize = byteSize;
-    if (FAILED(fileCentral->lpVtbl->TextData(fileCentral, CHARSET_TEXT,
-              TTSDATAFLAG_TAGGED, d, NULL, GUID_ITTSBufNotifySink)))
-        goto done;
-
-    /* Wait for this chunk to finish.  AudioStop arrives from the engine thread
-     * or this STA's queue, so pump messages and poll the flag. */
-    {
-        DWORD start = GetTickCount();
-        while (!g_audioStopped) {
-            MSG msg;
-            if (g_saveCancel) { fileCentral->lpVtbl->AudioReset(fileCentral); goto done; }
-            while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&msg);
-                DispatchMessageA(&msg);
-            }
-            if (GetTickCount() - start > 120000) break;  /* 2 min safety */
-            Sleep(5);
-        }
+    if (SUCCEEDED(fc->lpVtbl->QueryInterface(fc, &GUID_ITTSAttributesW,
+                  (void **)&at)) && at) {
+        at->lpVtbl->SpeedSet(at, speed);
+        at->lpVtbl->PitchSet(at, pitch);
+        at->lpVtbl->VolumeSet(at, 0xFFFFFFFF);
     }
-    pIAF->lpVtbl->Flush(pIAF);                  /* finalise the chunk .wav     */
+    /* wTime caps how far the engine may outrun real time when rendering to the
+     * file: a real-time *multiple* (~value/256), NOT a buffer.  The old 0x0800
+     * (8x) left Microsoft Sam at ~22s for a page; 0xFFFF (the maximum, "go as
+     * fast as you can") drops it to ~5s with byte-identical audio; 0 means 0x
+     * and hangs - never use it.  Measured with tools/test_s4speed.c. */
+    pIAF->lpVtbl->RealTimeSet(pIAF, 0xFFFF);
+    fc->lpVtbl->Register(fc, (PVOID)&sink.sink, GUID_ITTSNotifySinkW, &regKey);
+    if (FAILED(pIAF->lpVtbl->Set(pIAF, (LPCWSTR)wtmp, 1))) goto done;
+
+    d.pData  = (PVOID)chunk;
+    d.dwSize = (DWORD)((lstrlenW(chunk) + 1) * sizeof(WCHAR));
+    if (FAILED(fc->lpVtbl->TextData(fc, CHARSET_TEXT, TTSDATAFLAG_TAGGED,
+              d, NULL, GUID_ITTSBufNotifySink)))
+        goto done;
+
+    /* AudioStop arrives via this thread's STA queue, so pump and poll. */
+    start = GetTickCount();
+    while (!sink.stopped) {
+        if (g_saveCancel) { fc->lpVtbl->AudioReset(fc); goto done; }
+        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (GetTickCount() - start > 120000) break;   /* 2 min safety */
+        Sleep(2);
+    }
+    pIAF->lpVtbl->Flush(pIAF);
     ok = !g_saveCancel;
 
 done:
-    if (regKey && fileCentral) fileCentral->lpVtbl->UnRegister(fileCentral, regKey);
-    if (fileAttr)    fileAttr->lpVtbl->Release(fileAttr);
-    if (fileCentral) fileCentral->lpVtbl->Release(fileCentral);
-    if (pIAF)        pIAF->lpVtbl->Release(pIAF);
+    if (regKey && fc) fc->lpVtbl->UnRegister(fc, regKey);
+    if (at) at->lpVtbl->Release(at);
+    if (fc) fc->lpVtbl->Release(fc);
+    if (pIAF) pIAF->lpVtbl->Release(pIAF);
     return ok;
 }
 
+/* SAPI 4 file save.  The L&H runtime is NOT thread-safe: rendering chunks
+ * concurrently corrupts the audio - separately verified with
+ * tools/test_s4safe.c, where concurrent chunks came out different from the same
+ * chunks rendered serially, some even empty.  So chunks are rendered one at a
+ * time.  S4_CHUNK_CHARS is large, so a typical page is a single chunk with no
+ * joins at all; only very long text is split, and only ever at sentence ends
+ * (S4_ChunkLen) where the join lands in natural silence. */
 static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
                     const char *path, int fmt, int channels)
 {
@@ -447,10 +537,12 @@ static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
     WCHAR *wtext = NULL, *wtmp = NULL, *chunkBuf = NULL;
     char  *tmpWav = NULL;
     BYTE  *pcmAll = NULL;
-    DWORD  pcmCap = 0, pcmLen = 0;
+    DWORD  pcmCap = 0, pcmLen = 0, speed = 0;
+    WORD   pitch = 0;
     WAVEFORMATEX wf;
     BOOL   haveFmt = FALSE, ok = FALSE;
     int    total, pos;
+    GUID   mode;
     (void)asXml;
 
     if (!s->enumr || s->count <= 0) return FALSE;
@@ -462,6 +554,8 @@ static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
     chunkBuf = (WCHAR *)Mem_Alloc((S4_CHUNK_CHARS + 1) * sizeof(WCHAR));
     if (!wtmp || !chunkBuf) goto done;
 
+    mode  = s->modes[s->curVoice];
+    S4_MapParams(s, &speed, &pitch);
     total = lstrlenW(wtext);
 
     for (pos = 0; pos < total; ) {
@@ -473,7 +567,7 @@ static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
         memcpy(chunkBuf, wtext + pos, (SIZE_T)clen * sizeof(WCHAR));
         chunkBuf[clen] = 0;
 
-        if (!S4_RenderChunk(s, chunkBuf, (DWORD)((clen + 1) * sizeof(WCHAR)), wtmp))
+        if (!S4_RenderChunk(s->enumr, mode, speed, pitch, chunkBuf, wtmp))
             goto done;     /* error or cancel */
         if (!AudioFile_ReadWavPcm(tmpWav, &cpcm, &cpcmLen, &cwf))
             goto done;

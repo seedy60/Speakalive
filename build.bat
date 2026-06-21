@@ -17,8 +17,10 @@ rem  Avoid the characters & < > | ^ in the text values.
 rem ===================================================================
 set VER_MAJOR=2002
 set VER_MINOR=1
-set VER_PATCH=0
+set VER_PATCH=2
 set VER_BUILD=0
+rem Version string shown in Help -> About Speakalive (edit freely).
+set "VERSION=2002.1.2"
 set "PRODUCT_NAME=Speakalive"
 set "FILE_DESC=Speakalive text-to-speech"
 set "COMPANY=Seediffusion"
@@ -62,6 +64,7 @@ echo Generating version metadata...
 >>"%SRC%\verinfo.h"  echo #define SA_VER_PATCH     %VER_PATCH%
 >>"%SRC%\verinfo.h"  echo #define SA_VER_BUILD     %VER_BUILD%
 >>"%SRC%\verinfo.h"  echo #define SA_VERSION_STR   "%VER_STR%"
+>>"%SRC%\verinfo.h"  echo #define SA_VERSION       "%VERSION%"
 >>"%SRC%\verinfo.h"  echo #define SA_PRODUCT_NAME  "%PRODUCT_NAME%"
 >>"%SRC%\verinfo.h"  echo #define SA_FILE_DESC     "%FILE_DESC%"
 >>"%SRC%\verinfo.h"  echo #define SA_COMPANY       "%COMPANY%"
@@ -94,7 +97,7 @@ link /nologo /NODEFAULTLIB /ENTRY:WinMainCRTStartup ^
      onecore.obj webread.obj main.obj speakalive.res ^
      kernel32.lib user32.lib gdi32.lib comctl32.lib comdlg32.lib ^
      ole32.lib oleaut32.lib advapi32.lib winmm.lib msacm32.lib ^
-     wininet.lib sapi.lib uuid.lib || goto :fail
+     wininet.lib shell32.lib sapi.lib uuid.lib || goto :fail
 
 echo Patching PE header for Windows 2000 (subsystem 5.0)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\patch_pe.ps1" -Path "%OUT%\Speakalive.exe" || goto :fail
