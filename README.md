@@ -2,13 +2,13 @@
 
 At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
 
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of 43.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of 47.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
 ## Versioning
 
-Speakalive is a retro style program through and through. To show commitment to the bit, releases have a 2002.x.x version number.
+Speakalive is a retro style program through and through. To show commitment to the bit, releases have a 2022.x.x version number.
 
 ## Speakalive features
 

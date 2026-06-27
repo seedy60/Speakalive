@@ -16,6 +16,7 @@
 
 typedef struct {
     ISpVoice *voice;
+    ISpMMSysAudio *spkAudio;  /* shared speaker output, fixed at 48 kHz        */
     Voice    *list;
     int       count;
     int       rate;     /* -10..10 */
@@ -23,7 +24,7 @@ typedef struct {
     int       vol;      /* 0..100  */
     int       speaking;
     int       prefixLen;/* wchars of injected <pitch> markup, for offset fix */
-    int       outputIsSpeaker; /* live speaker output bound at the voice rate  */
+    int       outputIsSpeaker; /* live output is currently bound to spkAudio    */
     HWND      notify;
 } Sapi5;
 
@@ -216,9 +217,11 @@ static void S5_Shutdown(SpeechEngine *e)
     if (!s) return;
     if (s->voice) {
         ISpVoice_Speak(s->voice, NULL, SPF_PURGEBEFORESPEAK, NULL);
+        ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* unbind before releasing dest */
         ISpVoice_Release(s->voice);
         s->voice = NULL;
     }
+    if (s->spkAudio) { ISpMMSysAudio_Release(s->spkAudio); s->spkAudio = NULL; }
     FreeVoices(s);
 }
 
@@ -260,6 +263,33 @@ static void S5_SetVolume(SpeechEngine *e, int vol)
     if (s->voice) ISpVoice_SetVolume(s->voice, (USHORT)vol);
 }
 
+/* Bind live speech to a shared speaker output fixed at 48 kHz (created once).
+ * Using a fixed high rate rather than the selected voice's native rate means a
+ * voice switched in mid-utterance by a <voice> SSML tag is NOT downsampled to
+ * the UI voice's rate: any voice up to 48 kHz plays at full quality, lower ones
+ * are upsampled (which loses nothing).  Falls back to the default adapting
+ * output if the fixed device cannot be created. */
+static void BindSpeakerOutput(Sapi5 *s)
+{
+    if (!s->spkAudio &&
+        SUCCEEDED(CoCreateInstance(&CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
+                                   &IID_ISpMMSysAudio, (void **)&s->spkAudio)) &&
+        s->spkAudio) {
+        WAVEFORMATEX wfx;
+        ZeroMemory(&wfx, sizeof(wfx));
+        wfx.wFormatTag      = WAVE_FORMAT_PCM;
+        wfx.nChannels       = 1;
+        wfx.nSamplesPerSec  = 48000;
+        wfx.wBitsPerSample  = 16;
+        wfx.nBlockAlign     = 2;
+        wfx.nAvgBytesPerSec = 96000;
+        ISpMMSysAudio_SetFormat(s->spkAudio, &SPDFID_WaveFormatEx, &wfx);
+    }
+    if (!s->spkAudio ||
+        FAILED(ISpVoice_SetOutput(s->voice, (IUnknown *)s->spkAudio, FALSE)))
+        ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* fallback: native, adapting */
+}
+
 static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
 {
     Sapi5 *s = (Sapi5 *)e->priv;
@@ -273,11 +303,11 @@ static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     if (notify)
         ISpVoice_SetNotifyWindowMessage(s->voice, notify, WM_SA_SAPI5EVENT, 0, 0);
 
-    /* Bind the speaker output at the voice's native rate now (the device open
-     * that a file save deliberately skips).  Only when not already bound, so
-     * back-to-back speaks don't keep reopening the device. */
+    /* Bind the speaker output now (the device open a file save deliberately
+     * skips), only when not already bound so back-to-back speaks don't reopen
+     * the device.  See BindSpeakerOutput for the fixed-48 kHz rationale. */
     if (!s->outputIsSpeaker) {
-        ISpVoice_SetOutput(s->voice, NULL, TRUE);
+        BindSpeakerOutput(s);
         s->outputIsSpeaker = 1;
     }
 

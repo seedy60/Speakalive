@@ -77,8 +77,10 @@ typedef struct {
     ITTSAttributesW        *attr;
     IAudioMultiMediaDevice *audio;
     GUID    modes[S4_MAXVOICES];
+    DWORD   modeFeat[S4_MAXVOICES]; /* TTSFEATURE_* bits per voice (dwFeatures) */
     Voice   list[S4_MAXVOICES];
     int     count;
+    DWORD   features;             /* dwFeatures of the selected voice */
     DWORD   defSpeed;
     WORD    defPitch;
     DWORD   speedMin, speedMax;   /* the engine's real accepted speed range */
@@ -137,13 +139,91 @@ static struct ITTSNotifySinkWVtbl g_speakSinkVtbl = {
 };
 static ITTSNotifySinkW g_speakSink = { &g_speakSinkVtbl };
 
+/* ---- SAPI 4 teardown crash guard --------------------------------------------
+ * Some third-party voice DLLs ("Carlos", "Willi", ...) fault inside their own
+ * code when the audio destination they were bound to is released.  The dest's
+ * scarce device resource is freed only by that very release (it cannot be reused
+ * - other voices then crash on Select - nor leaked - it runs out after ~50), so
+ * we release it normally but SURVIVE a fault: S4_RelSave saves a recovery point;
+ * on an access violation while a guard is active on this thread, S4_CrashFilter
+ * restores it and resumes just past the release, abandoning that one broken
+ * object.  Win2000-safe (SetUnhandledExceptionFilter + CONTINUE_EXECUTION).
+ *
+ * g_s4Step records the current step (no I/O) so a genuinely unguarded crash
+ * still logs the faulting voice/step to speakalive_crash.log.  [diagnostic] */
+static char g_s4Step[256];
+static void S4_Mark(int idx, DWORD feat, const char *name, const char *step)
+{
+    wsprintfA(g_s4Step, "voice[%d] feat=0x%08lx \"%s\" -> %s",
+              idx, (unsigned long)feat, name ? name : "?", step ? step : "?");
+}
+
+static DWORD         g_relJb[6];   /* ebx, esi, edi, ebp, esp(post-ret), eip */
+static volatile LONG g_relGuard;   /* a guarded teardown is in progress      */
+static DWORD         g_relThread;  /* the thread that owns the guard         */
+
+/* setjmp-style: save the recovery point and return 0.  After a caught fault the
+ * crash filter makes this appear to "return" 1. */
+__declspec(naked) static int S4_RelSave(void)
+{
+    __asm {
+        mov  [g_relJb + 0],  ebx
+        mov  [g_relJb + 4],  esi
+        mov  [g_relJb + 8],  edi
+        mov  [g_relJb + 12], ebp
+        lea  eax, [esp + 4]              ; esp as it will be after the ret
+        mov  [g_relJb + 16], eax
+        mov  eax, [esp]                 ; return address (resume point)
+        mov  [g_relJb + 20], eax
+        xor  eax, eax                   ; first call returns 0
+        ret
+    }
+}
+
+static LONG WINAPI S4_CrashFilter(EXCEPTION_POINTERS *ep)
+{
+    char path[MAX_PATH], line[512];
+    DWORD n, w;
+    HANDLE h;
+    /* A fault inside a guarded teardown on our thread: resume past it. */
+    if (ep && g_relGuard && GetCurrentThreadId() == g_relThread &&
+        ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        CONTEXT *c = ep->ContextRecord;
+        c->Ebx = g_relJb[0]; c->Esi = g_relJb[1]; c->Edi = g_relJb[2];
+        c->Ebp = g_relJb[3]; c->Esp = g_relJb[4]; c->Eip = g_relJb[5];
+        c->Eax = 1;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    /* Otherwise it is a genuine unguarded crash - log it and terminate. */
+    n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        while (n > 0 && path[n - 1] != '\\') n--;
+        lstrcpynA(path + n, "speakalive_crash.log", (int)(MAX_PATH - n));
+        wsprintfA(line, "SAPI 4 crash: code=0x%08lx addr=0x%p\r\nlast step: %s\r\n",
+                  (unsigned long)(ep ? ep->ExceptionRecord->ExceptionCode : 0),
+                  ep ? ep->ExceptionRecord->ExceptionAddress : (PVOID)0, g_s4Step);
+        h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            SetFilePointer(h, 0, NULL, FILE_END);
+            WriteFile(h, line, lstrlenA(line), &w, NULL);
+            FlushFileBuffers(h);
+            CloseHandle(h);
+        }
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 /* SAPI 4 Set() REJECTS an out-of-range speed/pitch (it returns failure and
  * leaves the value unchanged) rather than clamping, and every voice has its own
  * range - e.g. L&H Peter accepts pitch up to 337 where Michelle stops at 190.
- * These probes binary-search the largest/smallest value Set still accepts, so
- * the sliders can span each voice's true range (matching what Balabolka reaches
- * at the extremes) instead of a fixed default-relative guess that fell short.
+ * These probes step out from the default and stop at the first value Set
+ * refuses, so the sliders can span each voice's true range.  Stepping (rather
+ * than a binary search) is deliberate: it tests just ONE value past each edge,
+ * never the wildly out-of-range values a binary search would, because some
+ * fragile third-party voice DLLs crash on those instead of returning an error.
  * 'kind' 0 = speed, 1 = pitch. */
+#define S4_PROBE_STEP 10
 static BOOL S4_TrySet(ITTSAttributesW *a, int kind, DWORD v)
 {
     return kind == 0 ? SUCCEEDED(a->lpVtbl->SpeedSet(a, v))
@@ -151,17 +231,17 @@ static BOOL S4_TrySet(ITTSAttributesW *a, int kind, DWORD v)
 }
 static DWORD S4_ProbeHi(ITTSAttributesW *a, int kind, DWORD def, DWORD cap)
 {
-    DWORD lo = def, hi = cap;                 /* def is accepted; cap may not be */
-    while (lo < hi) { DWORD mid = lo + (hi - lo + 1) / 2;
-        if (S4_TrySet(a, kind, mid)) lo = mid; else hi = mid - 1; }
-    return lo;
+    DWORD v = def;
+    while (v + S4_PROBE_STEP <= cap && S4_TrySet(a, kind, v + S4_PROBE_STEP))
+        v += S4_PROBE_STEP;
+    return v;
 }
 static DWORD S4_ProbeLo(ITTSAttributesW *a, int kind, DWORD def)
 {
-    DWORD lo = 1, hi = def;                    /* def is accepted; 1 may not be  */
-    while (lo < hi) { DWORD mid = lo + (hi - lo) / 2;
-        if (S4_TrySet(a, kind, mid)) hi = mid; else lo = mid + 1; }
-    return hi;
+    DWORD v = def;
+    while (v > S4_PROBE_STEP && S4_TrySet(a, kind, v - S4_PROBE_STEP))
+        v -= S4_PROBE_STEP;
+    return v;
 }
 
 /* Map the -10..10 sliders onto the voice's real range: 0 = default, +10 = the
@@ -205,61 +285,113 @@ static void ApplyParamsTo(Sapi4 *s, ITTSAttributesW *a)
     DWORD speed; WORD pitch;
     if (!a) return;
     S4_MapParams(s, &speed, &pitch);
-    a->lpVtbl->SpeedSet(a, speed);
-    a->lpVtbl->PitchSet(a, pitch);
+    /* Only set what the voice supports - see the dwFeatures note in DoSelect. */
+    if (s->features & TTSFEATURE_SPEED) a->lpVtbl->SpeedSet(a, speed);
+    if (s->features & TTSFEATURE_PITCH) a->lpVtbl->PitchSet(a, pitch);
 }
 
 static void ApplyParams(Sapi4 *s) { ApplyParamsTo(s, s->attr); }
 
 static void ReleaseSelection(Sapi4 *s)
 {
-    if (s->speakSinkReg && s->central) {
-        s->central->lpVtbl->UnRegister(s->central, s->speakRegKey);
-        s->speakSinkReg = 0;
+    int ci = (s->curVoice >= 0 && s->curVoice < s->count) ? s->curVoice : -1;
+    const char *cn = (ci >= 0) ? s->list[ci].name : "?";
+
+    /* Release the engine objects under the teardown guard (see S4_RelSave): a
+     * fault inside a fragile voice's cleanup is caught and that object abandoned
+     * instead of crashing the program.  There is only one Sapi4 (g_s4), so the
+     * recovery branch clears it directly rather than via a possibly-clobbered
+     * register. */
+    g_relThread = GetCurrentThreadId();
+    if (S4_RelSave() == 0) {
+        g_relGuard = 1;
+        if (s->speakSinkReg && s->central) {
+            S4_Mark(ci, s->features, cn, "release: unregister sink");
+            s->central->lpVtbl->UnRegister(s->central, s->speakRegKey);
+            s->speakSinkReg = 0;
+        }
+        if (s->attr)    { S4_Mark(ci, s->features, cn, "release: attr");    s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
+        if (s->central) { S4_Mark(ci, s->features, cn, "release: central"); s->central->lpVtbl->Release(s->central); s->central = NULL; }
+        if (s->audio)   { S4_Mark(ci, s->features, cn, "release: audio");   s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
+        g_relGuard = 0;
+        s->speedMin = s->speedMax = 0;   /* re-probed per voice in DoSelect */
+        s->pitchMin = s->pitchMax = 0;
+        s->features = 0;
+    } else {
+        /* A voice DLL faulted mid-teardown: abandon (leak) whatever is left so
+         * the app survives.  Only a handful of broken voices ever hit this.
+         * Use g_s4 (the sole instance) since 's' may be in a clobbered reg. */
+        g_relGuard = 0;
+        g_s4.attr = NULL; g_s4.central = NULL; g_s4.audio = NULL; g_s4.speakSinkReg = 0;
+        g_s4.speedMin = g_s4.speedMax = 0;
+        g_s4.pitchMin = g_s4.pitchMax = 0;
+        g_s4.features = 0;
     }
-    if (s->attr)    { s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
-    if (s->central) { s->central->lpVtbl->Release(s->central); s->central = NULL; }
-    if (s->audio)   { s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
-    s->speedMin = s->speedMax = 0;   /* re-probed per voice in DoSelect */
-    s->pitchMin = s->pitchMax = 0;
 }
 
 static BOOL DoSelect(Sapi4 *s, int index)
 {
     HRESULT hr;
+    const char *nm;
+    DWORD ft;
     if (index < 0 || index >= s->count || !s->enumr) return FALSE;
+    nm = s->list[index].name;
+    ft = s->modeFeat[index];
     ReleaseSelection(s);
 
-    /* A multimedia (speaker) audio destination.  If it cannot be created we
-     * still try Select with a NULL destination. */
+    /* A fresh multimedia (speaker) audio destination for every selection - it
+     * cannot be reused (a later voice Select()ed onto a used one crashes fragile
+     * voices like "Deep Douglas").  ReleaseSelection (above) freed the previous
+     * one under the teardown crash guard.  If it cannot be created we still try
+     * Select with a NULL dest. */
+    S4_Mark(index, ft, nm, "create audio dest");
     CoCreateInstance(&GUID_MMAudioDest, NULL, CLSCTX_ALL,
                      &GUID_IAudioMMDevice, (void **)&s->audio);
 
+    S4_Mark(index, ft, nm, "Select");
     hr = s->enumr->lpVtbl->Select(s->enumr, s->modes[index], &s->central,
                                   (LPUNKNOWN)s->audio);
     if (FAILED(hr) || !s->central) { ReleaseSelection(s); return FALSE; }
     s->curVoice = index;
 
+    s->features = ft;
+    s->defSpeed = 150;   /* sane fallbacks if the voice lacks speed/pitch */
+    s->defPitch = 100;
+
+    S4_Mark(index, ft, nm, "QI attributes");
     if (SUCCEEDED(s->central->lpVtbl->QueryInterface(s->central,
                   &GUID_ITTSAttributesW, (void **)&s->attr)) && s->attr) {
-        if (FAILED(s->attr->lpVtbl->SpeedGet(s->attr, &s->defSpeed))) s->defSpeed = 150;
-        if (FAILED(s->attr->lpVtbl->PitchGet(s->attr, &s->defPitch))) s->defPitch = 100;
-        s->attr->lpVtbl->VolumeSet(s->attr, 0xFFFFFFFF); /* full volume */
-        /* Discover this voice's true speed/pitch limits so the sliders reach
-         * the engine's real extremes (see S4_ProbeHi).  Restore the defaults
-         * afterwards - ApplyParams below sets the slider-driven values. */
-        s->speedMax = S4_ProbeHi(s->attr, 0, s->defSpeed, 2000);
-        s->speedMin = S4_ProbeLo(s->attr, 0, s->defSpeed);
-        s->pitchMax = (WORD)S4_ProbeHi(s->attr, 1, s->defPitch, 0xFFFF);
-        s->pitchMin = (WORD)S4_ProbeLo(s->attr, 1, s->defPitch);
-        s->attr->lpVtbl->SpeedSet(s->attr, s->defSpeed);
-        s->attr->lpVtbl->PitchSet(s->attr, s->defPitch);
+        /* Only ever touch attributes the voice advertises in dwFeatures:
+         * calling SpeedSet/PitchSet (or probing the range) on a voice that does
+         * not support them crashes some fragile third-party SAPI 4 voice DLLs.
+         * The probe itself is gentle (see S4_ProbeHi) for the same reason. */
+        if (s->features & TTSFEATURE_SPEED) {
+            S4_Mark(index, ft, nm, "speed get + probe");
+            if (FAILED(s->attr->lpVtbl->SpeedGet(s->attr, &s->defSpeed))) s->defSpeed = 150;
+            s->speedMax = S4_ProbeHi(s->attr, 0, s->defSpeed, 1000);
+            s->speedMin = S4_ProbeLo(s->attr, 0, s->defSpeed);
+            s->attr->lpVtbl->SpeedSet(s->attr, s->defSpeed);   /* restore default */
+        }
+        if (s->features & TTSFEATURE_PITCH) {
+            S4_Mark(index, ft, nm, "pitch get + probe");
+            if (FAILED(s->attr->lpVtbl->PitchGet(s->attr, &s->defPitch))) s->defPitch = 100;
+            s->pitchMax = (WORD)S4_ProbeHi(s->attr, 1, s->defPitch, 1000);
+            s->pitchMin = (WORD)S4_ProbeLo(s->attr, 1, s->defPitch);
+            s->attr->lpVtbl->PitchSet(s->attr, s->defPitch);   /* restore default */
+        }
+        if (s->features & TTSFEATURE_VOLUME) {
+            S4_Mark(index, ft, nm, "volume set");
+            s->attr->lpVtbl->VolumeSet(s->attr, 0xFFFFFFFF);   /* full volume */
+        }
     }
     /* Listen for chunk completions so we can queue the next chunk. */
+    S4_Mark(index, ft, nm, "register sink");
     if (SUCCEEDED(s->central->lpVtbl->Register(s->central, (PVOID)&g_speakSink,
                   GUID_ITTSNotifySinkW, &s->speakRegKey)))
         s->speakSinkReg = 1;
+    S4_Mark(index, ft, nm, "apply params");
     ApplyParams(s);
+    S4_Mark(index, ft, nm, "done");
     return TRUE;
 }
 
@@ -274,11 +406,26 @@ static BOOL S4_Detect(void)
     return FALSE;
 }
 
+/* A-law / mu-law voices are named like "Ludoviko 8000 A" / "8000 U" (vs the
+ * Linear "...L"): their 8 kHz G.711 telephony output cannot be played through
+ * the speaker - the engine refuses the speaker destination, so they only ever
+ * error on live speak.  Hidden from the voice list; the Linear (L) variants,
+ * which are higher quality and do play, remain. */
+static BOOL S4_IsTelephonyOnly(const char *name)
+{
+    int n = lstrlenA(name);
+    return n >= 3 && name[n - 2] == ' ' &&
+           (name[n - 1] == 'A' || name[n - 1] == 'U') &&
+           name[n - 3] >= '0' && name[n - 3] <= '9';
+}
+
 static BOOL S4_Init(SpeechEngine *eng)
 {
     Sapi4 *s = (Sapi4 *)eng->priv;
     HRESULT hr;
     if (s->enumr) return TRUE;
+
+    SetUnhandledExceptionFilter(S4_CrashFilter);   /* TEMP: capture select crash */
 
     hr = CoCreateInstance(&GUID_TTSEnumerator, NULL, CLSCTX_ALL,
                           &GUID_ITTSEnumW, (void **)&s->enumr);
@@ -289,14 +436,18 @@ static BOOL S4_Init(SpeechEngine *eng)
         TTSMODEINFOW mi;
         ULONG fetched = 0;
         char *a;
+        char nm[MAX_VOICE_NAME];
         if (s->enumr->lpVtbl->Next(s->enumr, 1, &mi, &fetched) != S_OK || fetched != 1)
             break;
-        s->modes[s->count] = mi.gModeID;
-        s->list[s->count].index = s->count;
+        nm[0] = 0;
         a = WideToAnsi(mi.szModeName[0] ? mi.szModeName : mi.szProductName);
-        if (a) { lstrcpynA(s->list[s->count].name, a, MAX_VOICE_NAME); Mem_Free(a); }
-        if (s->list[s->count].name[0] == 0)
-            lstrcpynA(s->list[s->count].name, "SAPI 4 voice", MAX_VOICE_NAME);
+        if (a) { lstrcpynA(nm, a, MAX_VOICE_NAME); Mem_Free(a); }
+        if (nm[0] == 0) lstrcpynA(nm, "SAPI 4 voice", MAX_VOICE_NAME);
+        if (S4_IsTelephonyOnly(nm)) continue;   /* A-law/mu-law: not playable */
+        s->modes[s->count] = mi.gModeID;
+        s->modeFeat[s->count] = mi.dwFeatures;
+        s->list[s->count].index = s->count;
+        lstrcpynA(s->list[s->count].name, nm, MAX_VOICE_NAME);
         s->count++;
         if (s->count >= S4_MAXVOICES) break;
     }
@@ -460,7 +611,8 @@ static struct ITTSNotifySinkWVtbl g_fileSinkVtbl = {
 /* Render one null-terminated chunk to 'wtmp' using the caller's enumerator.
  * Creates its own central, file destination and sink per call.  Called serially
  * (see S4_Save).  FALSE on error or cancel. */
-static BOOL S4_RenderChunk(ITTSEnumW *en, GUID mode, DWORD speed, WORD pitch,
+static BOOL S4_RenderChunk(ITTSEnumW *en, GUID mode, DWORD feat,
+                           DWORD speed, WORD pitch,
                            const WCHAR *chunk, const WCHAR *wtmp)
 {
     IAudioFile      *pIAF = NULL;
@@ -482,9 +634,10 @@ static BOOL S4_RenderChunk(ITTSEnumW *en, GUID mode, DWORD speed, WORD pitch,
         goto done;
     if (SUCCEEDED(fc->lpVtbl->QueryInterface(fc, &GUID_ITTSAttributesW,
                   (void **)&at)) && at) {
-        at->lpVtbl->SpeedSet(at, speed);
-        at->lpVtbl->PitchSet(at, pitch);
-        at->lpVtbl->VolumeSet(at, 0xFFFFFFFF);
+        /* Only set what the voice advertises - see the dwFeatures note in DoSelect. */
+        if (feat & TTSFEATURE_SPEED)  at->lpVtbl->SpeedSet(at, speed);
+        if (feat & TTSFEATURE_PITCH)  at->lpVtbl->PitchSet(at, pitch);
+        if (feat & TTSFEATURE_VOLUME) at->lpVtbl->VolumeSet(at, 0xFFFFFFFF);
     }
     /* wTime caps how far the engine may outrun real time when rendering to the
      * file: a real-time *multiple* (~value/256), NOT a buffer.  The old 0x0800
@@ -567,7 +720,7 @@ static BOOL S4_Save(SpeechEngine *eng, const char *text, BOOL asXml,
         memcpy(chunkBuf, wtext + pos, (SIZE_T)clen * sizeof(WCHAR));
         chunkBuf[clen] = 0;
 
-        if (!S4_RenderChunk(s->enumr, mode, speed, pitch, chunkBuf, wtmp))
+        if (!S4_RenderChunk(s->enumr, mode, s->features, speed, pitch, chunkBuf, wtmp))
             goto done;     /* error or cancel */
         if (!AudioFile_ReadWavPcm(tmpWav, &cpcm, &cpcmLen, &cwf))
             goto done;

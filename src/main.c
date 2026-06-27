@@ -250,6 +250,101 @@ static void CycleEngine(int dir)
     SwitchEngine(sel);   /* TCM_SETCURSEL does not raise TCN_SELCHANGE */
 }
 
+/* Best-effort well-formedness check of the XML/SSML the user typed, so a failed
+ * speak can say SPECIFICALLY what is wrong (unclosed tag, mismatched tag, a '<'
+ * where a '>' was meant, an unmatched quote) instead of a vague "check your
+ * markup".  Returns NULL when it looks well-formed, else a message in g_mkMsg.
+ * It checks structure, not the tag vocabulary - unknown tags still reach the
+ * engine, which reports those separately. */
+static char g_mkMsg[256];
+static char g_mkStack[32][64];   /* names of currently-open tags */
+
+static const char *CheckMarkup(const char *t)
+{
+    int depth = 0, i = 0;
+    while (t[i]) {
+        if (t[i] != '<') { i++; continue; }    /* a bare '>' is legal in content */
+
+        /* Skip XML declarations <?...?> and comments / doctype <!...>. */
+        if (t[i + 1] == '?' || t[i + 1] == '!') {
+            i += 2;
+            while (t[i] && t[i] != '>') i++;
+            if (!t[i]) { lstrcpynA(g_mkMsg,
+                "A '<?' or '<!' section was opened but never closed with '>'.",
+                sizeof(g_mkMsg)); return g_mkMsg; }
+            i++;
+            continue;
+        }
+        /* '<' followed by a space or nothing is a literal less-than, not a tag. */
+        if (t[i + 1] == ' ' || t[i + 1] == '\t' || t[i + 1] == '\r' ||
+            t[i + 1] == '\n' || t[i + 1] == '>' || t[i + 1] == 0) {
+            lstrcpynA(g_mkMsg, "A '<' is followed by a space or nothing, so it reads "
+                "as a literal less-than sign. To speak a literal <, write it as &lt;.",
+                sizeof(g_mkMsg));
+            return g_mkMsg;
+        }
+        {
+            int  isClose = (t[i + 1] == '/');
+            char name[64];
+            int  nl = 0, selfClose = 0;
+            int  j = i + 1 + (isClose ? 1 : 0);
+            char q = 0;                          /* open quote char, or 0 */
+
+            while (t[j] == ' ' || t[j] == '\t') j++;
+            while (t[j] && t[j] != ' ' && t[j] != '\t' && t[j] != '>' &&
+                   t[j] != '/' && t[j] != '<' && t[j] != '\r' && t[j] != '\n') {
+                if (nl < 63) name[nl++] = t[j];
+                j++;
+            }
+            name[nl] = 0;
+            if (nl == 0 && !isClose) {
+                lstrcpynA(g_mkMsg, "A '<' is not followed by a tag name.", sizeof(g_mkMsg));
+                return g_mkMsg;
+            }
+            /* Scan to the tag's '>', tracking quoted attribute values. */
+            while (t[j]) {
+                char c = t[j];
+                if (q) { if (c == q) q = 0; j++; continue; }
+                if (c == '"' || c == '\'') { q = c; j++; continue; }
+                if (c == '<') {
+                    wsprintfA(g_mkMsg, "Inside the tag <%s ...> there is a '<' before "
+                        "the '>' that should close it. Did you mean '>', or is a '>' missing?", name);
+                    return g_mkMsg;
+                }
+                if (c == '>') { if (t[j - 1] == '/') selfClose = 1; break; }
+                j++;
+            }
+            if (!t[j]) {
+                if (q) wsprintfA(g_mkMsg, "A quote mark is not matched in the tag <%s ...> - "
+                                 "check for a missing or extra quote around an attribute value.", name);
+                else   wsprintfA(g_mkMsg, "The tag <%s ...> was opened with '<' but never closed with '>'.", name);
+                return g_mkMsg;
+            }
+            i = j + 1;
+            if (isClose) {
+                if (depth == 0) {
+                    wsprintfA(g_mkMsg, "There is a closing tag </%s> with no matching opening tag before it.", name);
+                    return g_mkMsg;
+                }
+                if (lstrcmpA(g_mkStack[depth - 1], name) != 0) {
+                    wsprintfA(g_mkMsg, "The closing tag </%s> does not match the open tag <%s> - "
+                              "tags must be closed in the order they were opened.", name, g_mkStack[depth - 1]);
+                    return g_mkMsg;
+                }
+                depth--;
+            } else if (!selfClose) {
+                if (depth < 32) lstrcpynA(g_mkStack[depth++], name, 64);
+            }
+        }
+    }
+    if (depth > 0) {
+        wsprintfA(g_mkMsg, "The tag <%s> was opened but never closed - add a matching </%s>.",
+                  g_mkStack[depth - 1], g_mkStack[depth - 1]);
+        return g_mkMsg;
+    }
+    return NULL;
+}
+
 static void DoSpeak(void)
 {
     char *text;
@@ -262,12 +357,31 @@ static void DoSpeak(void)
         Mem_Free(text);
         return;
     }
+    /* With markup on, point out the exact syntax problem (announced) before the
+     * engine just refuses the whole passage with a vague failure. */
+    if (g_xmlMode) {
+        const char *err = CheckMarkup(text);
+        if (err) {
+            SetStatus("Markup error");
+            MessageBoxA(g_main, err, "Speakalive - markup error", MB_OK | MB_ICONWARNING);
+            Mem_Free(text);
+            return;
+        }
+    }
     if (g_engine->Speak(g_engine, text, g_xmlMode, g_main)) {
         g_speaking = TRUE; g_paused = FALSE;
         SetStatus("Speaking");
     } else {
+        /* A bare error beep tells a screen-reader user nothing, so show an
+         * announced message.  The markup (if any) already passed the syntax
+         * check above, so a failure here is a content/voice problem. */
         SetStatus("Speech failed");
-        MessageBeep(MB_ICONERROR);
+        MessageBoxA(g_main, g_xmlMode
+            ? "The text could not be spoken. The markup is well-formed, but a tag "
+              "or value may not be supported by the selected voice."
+            : "The text could not be spoken. The selected voice was unable to "
+              "handle this text.",
+            "Speakalive", MB_OK | MB_ICONWARNING);
     }
     Mem_Free(text);
 }
