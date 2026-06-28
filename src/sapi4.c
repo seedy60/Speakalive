@@ -147,17 +147,7 @@ static ITTSNotifySinkW g_speakSink = { &g_speakSinkVtbl };
  * we release it normally but SURVIVE a fault: S4_RelSave saves a recovery point;
  * on an access violation while a guard is active on this thread, S4_CrashFilter
  * restores it and resumes just past the release, abandoning that one broken
- * object.  Win2000-safe (SetUnhandledExceptionFilter + CONTINUE_EXECUTION).
- *
- * g_s4Step records the current step (no I/O) so a genuinely unguarded crash
- * still logs the faulting voice/step to speakalive_crash.log.  [diagnostic] */
-static char g_s4Step[256];
-static void S4_Mark(int idx, DWORD feat, const char *name, const char *step)
-{
-    wsprintfA(g_s4Step, "voice[%d] feat=0x%08lx \"%s\" -> %s",
-              idx, (unsigned long)feat, name ? name : "?", step ? step : "?");
-}
-
+ * object.  Win2000-safe (SetUnhandledExceptionFilter + CONTINUE_EXECUTION). */
 static DWORD         g_relJb[6];   /* ebx, esi, edi, ebp, esp(post-ret), eip */
 static volatile LONG g_relGuard;   /* a guarded teardown is in progress      */
 static DWORD         g_relThread;  /* the thread that owns the guard         */
@@ -182,10 +172,8 @@ __declspec(naked) static int S4_RelSave(void)
 
 static LONG WINAPI S4_CrashFilter(EXCEPTION_POINTERS *ep)
 {
-    char path[MAX_PATH], line[512];
-    DWORD n, w;
-    HANDLE h;
-    /* A fault inside a guarded teardown on our thread: resume past it. */
+    /* A fault inside a guarded teardown on our thread: restore the recovery point
+     * and resume just past the release, abandoning that one broken object. */
     if (ep && g_relGuard && GetCurrentThreadId() == g_relThread &&
         ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         CONTEXT *c = ep->ContextRecord;
@@ -194,23 +182,7 @@ static LONG WINAPI S4_CrashFilter(EXCEPTION_POINTERS *ep)
         c->Eax = 1;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
-    /* Otherwise it is a genuine unguarded crash - log it and terminate. */
-    n = GetModuleFileNameA(NULL, path, MAX_PATH);
-    if (n && n < MAX_PATH) {
-        while (n > 0 && path[n - 1] != '\\') n--;
-        lstrcpynA(path + n, "speakalive_crash.log", (int)(MAX_PATH - n));
-        wsprintfA(line, "SAPI 4 crash: code=0x%08lx addr=0x%p\r\nlast step: %s\r\n",
-                  (unsigned long)(ep ? ep->ExceptionRecord->ExceptionCode : 0),
-                  ep ? ep->ExceptionRecord->ExceptionAddress : (PVOID)0, g_s4Step);
-        h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            SetFilePointer(h, 0, NULL, FILE_END);
-            WriteFile(h, line, lstrlenA(line), &w, NULL);
-            FlushFileBuffers(h);
-            CloseHandle(h);
-        }
-    }
+    /* Any other fault is genuine: let the process terminate as usual. */
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -294,9 +266,6 @@ static void ApplyParams(Sapi4 *s) { ApplyParamsTo(s, s->attr); }
 
 static void ReleaseSelection(Sapi4 *s)
 {
-    int ci = (s->curVoice >= 0 && s->curVoice < s->count) ? s->curVoice : -1;
-    const char *cn = (ci >= 0) ? s->list[ci].name : "?";
-
     /* Release the engine objects under the teardown guard (see S4_RelSave): a
      * fault inside a fragile voice's cleanup is caught and that object abandoned
      * instead of crashing the program.  There is only one Sapi4 (g_s4), so the
@@ -306,13 +275,12 @@ static void ReleaseSelection(Sapi4 *s)
     if (S4_RelSave() == 0) {
         g_relGuard = 1;
         if (s->speakSinkReg && s->central) {
-            S4_Mark(ci, s->features, cn, "release: unregister sink");
             s->central->lpVtbl->UnRegister(s->central, s->speakRegKey);
             s->speakSinkReg = 0;
         }
-        if (s->attr)    { S4_Mark(ci, s->features, cn, "release: attr");    s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
-        if (s->central) { S4_Mark(ci, s->features, cn, "release: central"); s->central->lpVtbl->Release(s->central); s->central = NULL; }
-        if (s->audio)   { S4_Mark(ci, s->features, cn, "release: audio");   s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
+        if (s->attr)    { s->attr->lpVtbl->Release(s->attr);       s->attr = NULL; }
+        if (s->central) { s->central->lpVtbl->Release(s->central); s->central = NULL; }
+        if (s->audio)   { s->audio->lpVtbl->Release(s->audio);     s->audio = NULL; }
         g_relGuard = 0;
         s->speedMin = s->speedMax = 0;   /* re-probed per voice in DoSelect */
         s->pitchMin = s->pitchMax = 0;
@@ -332,10 +300,8 @@ static void ReleaseSelection(Sapi4 *s)
 static BOOL DoSelect(Sapi4 *s, int index)
 {
     HRESULT hr;
-    const char *nm;
     DWORD ft;
     if (index < 0 || index >= s->count || !s->enumr) return FALSE;
-    nm = s->list[index].name;
     ft = s->modeFeat[index];
     ReleaseSelection(s);
 
@@ -344,11 +310,9 @@ static BOOL DoSelect(Sapi4 *s, int index)
      * voices like "Deep Douglas").  ReleaseSelection (above) freed the previous
      * one under the teardown crash guard.  If it cannot be created we still try
      * Select with a NULL dest. */
-    S4_Mark(index, ft, nm, "create audio dest");
     CoCreateInstance(&GUID_MMAudioDest, NULL, CLSCTX_ALL,
                      &GUID_IAudioMMDevice, (void **)&s->audio);
 
-    S4_Mark(index, ft, nm, "Select");
     hr = s->enumr->lpVtbl->Select(s->enumr, s->modes[index], &s->central,
                                   (LPUNKNOWN)s->audio);
     if (FAILED(hr) || !s->central) { ReleaseSelection(s); return FALSE; }
@@ -358,7 +322,6 @@ static BOOL DoSelect(Sapi4 *s, int index)
     s->defSpeed = 150;   /* sane fallbacks if the voice lacks speed/pitch */
     s->defPitch = 100;
 
-    S4_Mark(index, ft, nm, "QI attributes");
     if (SUCCEEDED(s->central->lpVtbl->QueryInterface(s->central,
                   &GUID_ITTSAttributesW, (void **)&s->attr)) && s->attr) {
         /* Only ever touch attributes the voice advertises in dwFeatures:
@@ -366,32 +329,26 @@ static BOOL DoSelect(Sapi4 *s, int index)
          * not support them crashes some fragile third-party SAPI 4 voice DLLs.
          * The probe itself is gentle (see S4_ProbeHi) for the same reason. */
         if (s->features & TTSFEATURE_SPEED) {
-            S4_Mark(index, ft, nm, "speed get + probe");
             if (FAILED(s->attr->lpVtbl->SpeedGet(s->attr, &s->defSpeed))) s->defSpeed = 150;
             s->speedMax = S4_ProbeHi(s->attr, 0, s->defSpeed, 1000);
             s->speedMin = S4_ProbeLo(s->attr, 0, s->defSpeed);
             s->attr->lpVtbl->SpeedSet(s->attr, s->defSpeed);   /* restore default */
         }
         if (s->features & TTSFEATURE_PITCH) {
-            S4_Mark(index, ft, nm, "pitch get + probe");
             if (FAILED(s->attr->lpVtbl->PitchGet(s->attr, &s->defPitch))) s->defPitch = 100;
             s->pitchMax = (WORD)S4_ProbeHi(s->attr, 1, s->defPitch, 1000);
             s->pitchMin = (WORD)S4_ProbeLo(s->attr, 1, s->defPitch);
             s->attr->lpVtbl->PitchSet(s->attr, s->defPitch);   /* restore default */
         }
         if (s->features & TTSFEATURE_VOLUME) {
-            S4_Mark(index, ft, nm, "volume set");
             s->attr->lpVtbl->VolumeSet(s->attr, 0xFFFFFFFF);   /* full volume */
         }
     }
     /* Listen for chunk completions so we can queue the next chunk. */
-    S4_Mark(index, ft, nm, "register sink");
     if (SUCCEEDED(s->central->lpVtbl->Register(s->central, (PVOID)&g_speakSink,
                   GUID_ITTSNotifySinkW, &s->speakRegKey)))
         s->speakSinkReg = 1;
-    S4_Mark(index, ft, nm, "apply params");
     ApplyParams(s);
-    S4_Mark(index, ft, nm, "done");
     return TRUE;
 }
 
@@ -425,7 +382,7 @@ static BOOL S4_Init(SpeechEngine *eng)
     HRESULT hr;
     if (s->enumr) return TRUE;
 
-    SetUnhandledExceptionFilter(S4_CrashFilter);   /* TEMP: capture select crash */
+    SetUnhandledExceptionFilter(S4_CrashFilter);   /* teardown crash guard */
 
     hr = CoCreateInstance(&GUID_TTSEnumerator, NULL, CLSCTX_ALL,
                           &GUID_ITTSEnumW, (void **)&s->enumr);

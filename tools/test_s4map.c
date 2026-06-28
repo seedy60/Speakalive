@@ -21,9 +21,10 @@ static void Out(const char *s){ DWORD w; WriteFile(GetStdHandle(STD_OUTPUT_HANDL
 static TTSMODEINFOW g_mi;
 
 /* ---- copies of the app's probe + map ---- */
+/* mirror the app's gentle step probe (S4_PROBE_STEP=10) */
 static BOOL TrySet(ITTSAttributesW *a,int kind,DWORD v){ return kind==0?SUCCEEDED(a->lpVtbl->SpeedSet(a,v)):SUCCEEDED(a->lpVtbl->PitchSet(a,(WORD)v)); }
-static DWORD ProbeHi(ITTSAttributesW *a,int kind,DWORD def,DWORD cap){ DWORD lo=def,hi=cap; while(lo<hi){ DWORD m=lo+(hi-lo+1)/2; if(TrySet(a,kind,m))lo=m; else hi=m-1; } return lo; }
-static DWORD ProbeLo(ITTSAttributesW *a,int kind,DWORD def){ DWORD lo=1,hi=def; while(lo<hi){ DWORD m=lo+(hi-lo)/2; if(TrySet(a,kind,m))hi=m; else lo=m+1; } return hi; }
+static DWORD ProbeHi(ITTSAttributesW *a,int kind,DWORD def,DWORD cap){ DWORD v=def; while(v+10<=cap && TrySet(a,kind,v+10)) v+=10; return v; }
+static DWORD ProbeLo(ITTSAttributesW *a,int kind,DWORD def){ DWORD v=def; while(v>10 && TrySet(a,kind,v-10)) v-=10; return v; }
 
 static DWORD g_sMin,g_sMax,g_pMin,g_pMax,g_dS; static WORD g_dP;
 static DWORD mapSpeed(int rate){ long v; DWORD dS=g_dS?g_dS:150;
@@ -49,8 +50,8 @@ void __cdecl WinMainCRTStartup(void){
         if(SUCCEEDED(en->lpVtbl->Select(en,g_mi.gModeID,&fc,(LPUNKNOWN)pIAF))&&fc){
             if(SUCCEEDED(fc->lpVtbl->QueryInterface(fc,&GUID_ITTSAttributesW,(void**)&at))&&at){
                 at->lpVtbl->SpeedGet(at,&g_dS); at->lpVtbl->PitchGet(at,&g_dP);
-                g_sMax=ProbeHi(at,0,g_dS,2000); g_sMin=ProbeLo(at,0,g_dS);
-                g_pMax=ProbeHi(at,1,g_dP,0xFFFF); g_pMin=ProbeLo(at,1,g_dP);
+                g_sMax=ProbeHi(at,0,g_dS,1000); g_sMin=ProbeLo(at,0,g_dS);
+                g_pMax=ProbeHi(at,1,g_dP,1000); g_pMin=ProbeLo(at,1,g_dP);
                 wsprintfA(b,"%-46s spd[%lu/%lu/%lu]->%lu/%lu/%lu  pit[%lu/%u/%lu]->%lu/%lu/%lu\n",nm,
                     (unsigned long)g_sMin,(unsigned long)g_dS,(unsigned long)g_sMax,
                     (unsigned long)mapSpeed(-10),(unsigned long)mapSpeed(0),(unsigned long)mapSpeed(10),

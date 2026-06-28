@@ -17,10 +17,10 @@ rem  Avoid the characters & < > | ^ in the text values.
 rem ===================================================================
 set VER_MAJOR=2002
 set VER_MINOR=1
-set VER_PATCH=2
+set VER_PATCH=4
 set VER_BUILD=0
 rem Version string shown in Help -> About Speakalive (edit freely).
-set "VERSION=2002.1.2"
+set "VERSION=2002.1.4"
 set "PRODUCT_NAME=Speakalive"
 set "FILE_DESC=Speakalive text-to-speech"
 set "COMPANY=Seediffusion"

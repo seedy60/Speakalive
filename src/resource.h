@@ -40,6 +40,7 @@
 #define IDM_PREVENGINE  2014
 #define IDM_WEBPAGE     2015
 #define IDM_STEREO      2016
+#define IDM_RENAMEVOICE 2017
 
 /* ---- Resources ---- */
 #define IDA_ACCEL       3001
@@ -55,5 +56,10 @@
 #define IDD_PROGRESS    6004
 #define IDC_PROGRESSLBL 6005
 #define IDC_PROGRESSBAR 6006
+
+/* ---- "Rename Voice" dialog ---- */
+#define IDD_RENAME      6007
+#define IDC_RENAMELBL   6008
+#define IDC_RENAMEEDIT  6009
 
 #endif /* SPEAKALIVE_RESOURCE_H */

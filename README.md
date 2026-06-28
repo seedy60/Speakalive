@@ -2,7 +2,7 @@
 
 At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
 
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of 47.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of 49 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
@@ -12,7 +12,7 @@ Speakalive is a retro style program through and through. To show commitment to t
 
 ## Speakalive features
 
-Speakalive speaks your text through whichever speech engines are installed on your computer: SAPI 4, SAPI 5, and the modern Windows OneCore voices on Windows 10 and 11. Each engine gets its own tab, and only the engines you actually have are shown, so the program automatically fits the machine it is running on. You can choose any installed voice, adjust the speaking rate and pitch (and the volume on SAPI 5), and start, pause, and stop the speech with single keypresses. You can save what you hear to a WAV or MP3 file in mono or stereo, and save the text you have written to a plain text file. Speakalive understands SAPI 4 control tags and SAPI 5 XML / SSML markup, so you can fine-tune pronunciation, emphasis, and timing right inside your text. A dark mode follows your Windows theme on Windows 10 and 11 and can be switched on by hand on older systems.
+Speakalive speaks your text through whichever speech engines are installed on your computer: SAPI 4, SAPI 5, and the modern Windows OneCore voices on Windows 10 and 11. Each engine gets its own tab, and only the engines you actually have are shown, so the program automatically fits the machine it is running on. You can choose any installed voice, give it a short friendly name of your own, adjust the speaking rate and pitch (and the volume on SAPI 5), and start, pause, and stop the speech with single keypresses. You can save what you hear to a WAV or MP3 file in mono or stereo, and save the text you have written to a plain text file. Speakalive understands SAPI 4 control tags and SAPI 5 XML / SSML markup, so you can fine-tune pronunciation, emphasis, and timing right inside your text. A dark mode follows your Windows theme on Windows 10 and 11 and can be switched on by hand on older systems.
 
 ## Running Speakalive
 
@@ -37,6 +37,16 @@ When Speakalive opens, the engines available on your computer are shown as tabs 
 
 The voice list, the sliders, and the available features update to match the engine you choose. Volume, for example, is offered only on SAPI 5.
 
+## Renaming voices
+
+The names speech engines give their voices can be long and unfriendly, such as "Adult Female #1, American English (TruVoice)". Speakalive lets you give any voice a short name of your own.
+
+1. Select the voice you want to rename in the Voice list.
+2. Choose Speech then Rename Voice, or press Control + R.
+3. Type a friendly name, E.G. "Bridget", and press OK. Leave the box blank to go back to the voice's original name.
+
+From then on the friendly name is what appears in the Voice list, and the list re-sorts by it. Your custom names are remembered between sessions and stored per voice, so picking a renamed voice still selects exactly the right one.
+
 ## Speaking text
 
 1. Tab to the large Text to speak box and type or paste your text. Press Enter for new lines; press Tab to move on to the next control.
@@ -48,7 +58,7 @@ You can also use the Speech menu, which lists every action together with its sho
 
 ## Adjusting rate, pitch and volume
 
-Below the text box are sliders for Rate and Pitch, and on SAPI 5, Volume. Tab to a slider and use the arrow keys, Page Up / Page Down, or Home / End to change it. The current value is shown beside each slider. Rate and Pitch read out as a signed number where 0 is the engine's normal setting; Volume reads as a percentage. Press the Reset Sliders button, or choose Speech then Reset Sliders, to put rate and pitch back to normal and volume back to 100 percent.
+Below the text box are sliders for Rate and Pitch, and on SAPI 5, Volume. Tab to a slider and use the arrow keys, Page Up / Page Down, or Home / End to change it. The current value is shown beside each slider. Rate and Pitch read out as a signed number where 0 is the engine's normal setting; Volume reads as a percentage. Press the Reset Sliders button (Alt + E), or choose Speech then Reset Sliders, to put rate and pitch back to normal and volume back to 100 percent.
 
 ## Markup: control tags and XML
 
@@ -57,6 +67,8 @@ Speakalive can pass speech markup straight through to the engine so you can cont
 * SAPI 5 uses XML / SSML, E.G. `Hello <emph>there</emph>. <rate speed="-3"/>now a little slower.`
 * OneCore uses SSML, E.G. `<speak version='1.0' xml:lang='en-US'><prosody rate='slow'>Hello</prosody></speak>`
 * SAPI 4 uses its own control tags, E.G. `\Spd=120\ Hello \Pit=80\ now lower.` SAPI 4 control tags are always honoured.
+
+When Speak as XML / SSML is on, Speakalive checks your markup before it speaks and, if something is wrong, tells you exactly what: an unclosed tag, a missing or extra quote mark, mismatched tags, or a `<` where a `>` was meant. You get a clear message naming the problem tag instead of a passage that silently refuses to speak.
 
 With Speak as XML / SSML turned off, your text is read out exactly as written and any special characters are spoken literally.
 
@@ -107,6 +119,7 @@ Speakalive is built to be operated entirely from the keyboard and to read well u
 * Every label carries an Alt + letter shortcut, E.G. Alt + S jumps to the text box and Alt + R to the Rate slider.
 * Tab and Shift + Tab move through every control, including out of the multi-line text box, and Control + A selects all of the text in it.
 * Current status, E.G. Speaking, Paused, or Audio saved, is reported in the status bar. The window title stays a plain "Speakalive" so it does not churn while speaking.
+* When something cannot be done, E.G. a markup mistake or a voice that cannot speak the text, Speakalive shows a clear message that your screen reader reads aloud, rather than only an error beep.
 * Speech then Highlight Spoken Word (off by default) selects each word in the text box as it is spoken. It is off by default because, with focus in the text box, each selection change would make a screen reader announce the highlighted word over the speech.
 
 ## Keyboard shortcuts
@@ -118,6 +131,7 @@ Speakalive is built to be operated entirely from the keyboard and to read well u
 | F7 | Stop |
 | Control + Tab | Next speech engine |
 | Control + Shift + Tab | Previous speech engine |
+| Control + R | Rename the selected voice |
 | Control + W | Open and read a web page |
 | Control + S | Save your text to a text file |
 | Control + Shift + S | Save spoken audio to a WAV / MP3 file |

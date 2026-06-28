@@ -175,6 +175,41 @@ static void ApplyAllSliders(void)
 
 /* ---- voices ---------------------------------------------------------- */
 
+/* ---- friendly voice names ----
+ * Users can give a voice a short custom name instead of the engine's long one
+ * (e.g. "Adult Female #1, American English (TruVoice)").  Each is kept in the
+ * registry keyed by the voice's ORIGINAL name, so it survives restarts and maps
+ * back to the right voice regardless of list order. */
+#define SA_VOICEKEY "Software\\Speakalive\\VoiceNames"
+
+static void VoiceFriendlyGet(const char *orig, char *out, DWORD len)
+{
+    HKEY  k;
+    DWORD sz = len, type = 0;
+    out[0] = 0;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, SA_VOICEKEY, 0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(k, orig, NULL, &type, (BYTE *)out, &sz) != ERROR_SUCCESS ||
+            type != REG_SZ)
+            out[0] = 0;
+        RegCloseKey(k);
+    }
+    out[len - 1] = 0;
+}
+
+static void VoiceFriendlySet(const char *orig, const char *friendly)
+{
+    HKEY k;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, SA_VOICEKEY, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &k, NULL) == ERROR_SUCCESS) {
+        if (friendly && friendly[0])
+            RegSetValueExA(k, orig, 0, REG_SZ, (const BYTE *)friendly,
+                           (DWORD)lstrlenA(friendly) + 1);
+        else
+            RegDeleteValueA(k, orig);   /* blank -> revert to the original name */
+        RegCloseKey(k);
+    }
+}
+
 static void PopulateVoices(void)
 {
     Voice *v = NULL;
@@ -182,10 +217,16 @@ static void PopulateVoices(void)
     SendMessageA(g_voice, CB_RESETCONTENT, 0, 0);
     if (g_engine && g_engine->GetVoices) n = g_engine->GetVoices(g_engine, &v);
     /* The list is sorted alphabetically (CBS_SORT), so remember each item's
-     * real engine index in its item data. */
+     * real engine index in its item data.  The text shown is the voice's
+     * friendly name if one has been set, otherwise its original name. */
     for (i = 0; i < n; i++) {
-        int pos = (int)SendMessageA(g_voice, CB_ADDSTRING, 0, (LPARAM)v[i].name);
-        if (pos >= 0) SendMessageA(g_voice, CB_SETITEMDATA, pos, (LPARAM)i);
+        char disp[160];
+        VoiceFriendlyGet(v[i].name, disp, sizeof(disp));
+        if (disp[0] == 0) lstrcpynA(disp, v[i].name, sizeof(disp));
+        {
+            int pos = (int)SendMessageA(g_voice, CB_ADDSTRING, 0, (LPARAM)disp);
+            if (pos >= 0) SendMessageA(g_voice, CB_SETITEMDATA, pos, (LPARAM)i);
+        }
     }
     if (n > 0) {
         SendMessageA(g_voice, CB_SETCURSEL, 0, 0);
@@ -194,6 +235,21 @@ static void PopulateVoices(void)
                 (int)SendMessageA(g_voice, CB_GETITEMDATA, 0, 0));
     }
     EnableWindow(g_voice, n > 0);
+}
+
+/* Select the combo item that maps to a given engine voice index (item data),
+ * and tell the engine.  Used to keep a voice selected after it is renamed and
+ * the list re-sorts. */
+static void SelectVoiceByEngineIndex(int idx)
+{
+    int cnt = (int)SendMessageA(g_voice, CB_GETCOUNT, 0, 0), i;
+    for (i = 0; i < cnt; i++) {
+        if ((int)SendMessageA(g_voice, CB_GETITEMDATA, i, 0) == idx) {
+            SendMessageA(g_voice, CB_SETCURSEL, i, 0);
+            if (g_engine && g_engine->SetVoice) g_engine->SetVoice(g_engine, idx);
+            return;
+        }
+    }
 }
 
 /* ---- engine switching ------------------------------------------------ */
@@ -608,6 +664,89 @@ static INT_PTR CALLBACK UrlDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
+/* "Rename Voice" dialog: edit pre-filled with the current friendly name (blank
+ * if none), caption naming the voice.  buf is in/out. */
+typedef struct { const char *orig; char *buf; int len; } RenameCtx;
+
+static INT_PTR CALLBACK RenameDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    RenameCtx *ctx;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        char cap[300];
+        SetWindowLongPtrA(dlg, DWLP_USER, (LONG_PTR)lp);
+        ctx = (RenameCtx *)(LONG_PTR)lp;
+        wsprintfA(cap, "Rename voice: %s", ctx->orig);
+        SetWindowTextA(dlg, cap);
+        SetDlgItemTextA(dlg, IDC_RENAMEEDIT, ctx->buf);
+        SendDlgItemMessageA(dlg, IDC_RENAMEEDIT, EM_SETSEL, 0, -1);  /* select all */
+        SendMessageA(dlg, DM_SETDEFID, IDOK, 0);
+        SetTitleBarDark(dlg, g_dark);
+        SetFocus(GetDlgItem(dlg, IDC_RENAMEEDIT));
+        return FALSE;
+    }
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        if (g_dark) {
+            SetTextColor((HDC)wp, DARK_TXT);
+            SetBkColor((HDC)wp, DARK_BG);
+            return (INT_PTR)g_brBg;
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+        if (g_dark) {
+            SetTextColor((HDC)wp, DARK_TXT);
+            SetBkColor((HDC)wp, DARK_CTL);
+            return (INT_PTR)g_brCtl;
+        }
+        break;
+    case WM_DRAWITEM:
+        DrawButton((const DRAWITEMSTRUCT *)lp);
+        return TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            ctx = (RenameCtx *)(LONG_PTR)GetWindowLongPtrA(dlg, DWLP_USER);
+            if (ctx) GetDlgItemTextA(dlg, IDC_RENAMEEDIT, ctx->buf, ctx->len);
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+        break;
+    }
+    return FALSE;
+}
+
+/* Give the currently-selected voice a friendly display name (or clear it). */
+static void DoRenameVoice(void)
+{
+    Voice *v = NULL;
+    int    n, sel, idx;
+    char   orig[256], friendly[128];
+    RenameCtx ctx;
+
+    if (g_saving) return;
+    if (!g_engine || !g_engine->GetVoices) { MessageBeep(MB_ICONWARNING); return; }
+    sel = (int)SendMessageA(g_voice, CB_GETCURSEL, 0, 0);
+    if (sel < 0) { SetStatus("Select a voice to rename first"); MessageBeep(MB_ICONASTERISK); return; }
+    idx = (int)SendMessageA(g_voice, CB_GETITEMDATA, sel, 0);
+    n = g_engine->GetVoices(g_engine, &v);
+    if (idx < 0 || idx >= n) return;
+    lstrcpynA(orig, v[idx].name, sizeof(orig));
+
+    VoiceFriendlyGet(orig, friendly, sizeof(friendly));   /* pre-fill current name */
+    ctx.orig = orig; ctx.buf = friendly; ctx.len = (int)sizeof(friendly);
+    if (DialogBoxParamA(g_inst, MAKEINTRESOURCEA(IDD_RENAME), g_main,
+                        RenameDlgProc, (LPARAM)&ctx) != IDOK)
+        return;
+
+    VoiceFriendlySet(orig, friendly);   /* save, or clear when left blank */
+    PopulateVoices();                   /* re-list (name change re-sorts it) */
+    SelectVoiceByEngineIndex(idx);      /* keep this voice selected */
+    SetStatus(friendly[0] ? "Voice renamed" : "Voice name reset to original");
+}
+
 /* Remove the transient save-notification tray icon if it is showing. */
 static void RemoveTrayIcon(void)
 {
@@ -992,7 +1131,7 @@ static void CreateControls(void)
                        TBS_AUTOTICKS, IDC_VOLUME);
     g_volVal   = Child("STATIC", "100%", SS_LEFT, IDC_VOLVAL);
 
-    g_reset = Child("BUTTON", "&Reset Sliders", WS_TABSTOP | BS_OWNERDRAW, IDC_RESET);
+    g_reset = Child("BUTTON", "R&eset Sliders", WS_TABSTOP | BS_OWNERDRAW, IDC_RESET);
     g_speak = Child("BUTTON", "Spea&k (F5)", WS_TABSTOP | BS_OWNERDRAW, IDC_SPEAK);
     g_pause = Child("BUTTON", "Pla&y/Pause (F6)", WS_TABSTOP | BS_OWNERDRAW, IDC_PAUSE);
     g_stop  = Child("BUTTON", "S&top (F7)", WS_TABSTOP | BS_OWNERDRAW, IDC_STOP);
@@ -1605,6 +1744,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SAVE:                  DoSave();       return 0;
         case IDM_SAVETEXT:              DoSaveText();   return 0;
         case IDM_WEBPAGE:               DoWebPage();    return 0;
+        case IDM_RENAMEVOICE:           DoRenameVoice(); return 0;
         case IDM_ABOUT:                 DoAbout();      return 0;
         case IDM_EXIT:  SendMessageA(hwnd, WM_CLOSE, 0, 0); return 0;
         case IDM_XML:

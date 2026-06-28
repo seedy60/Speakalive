@@ -71,10 +71,11 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Ne&xt Engine\tCtrl+Tab",         IDM_NEXTENGINE
         MENUITEM "Pre&vious Engine\tCtrl+Shift+Tab", IDM_PREVENGINE
+        MENUITEM "Re&name Voice...\tCtrl+R",       IDM_RENAMEVOICE
         MENUITEM SEPARATOR
         MENUITEM "Speak as &XML / SSML",           IDM_XML
         MENUITEM "&Highlight Spoken Word",         IDM_HIGHLIGHT
-        MENUITEM "&Reset Sliders",                 IDM_RESET
+        MENUITEM "R&eset Sliders",                 IDM_RESET
     END
     POPUP "&View"
     BEGIN
@@ -95,6 +96,7 @@ BEGIN
     "S",    IDM_SAVETEXT,   VIRTKEY, CONTROL
     "S",    IDM_SAVE,       VIRTKEY, CONTROL, SHIFT
     "W",    IDM_WEBPAGE,    VIRTKEY, CONTROL
+    "R",    IDM_RENAMEVOICE, VIRTKEY, CONTROL
     VK_TAB, IDM_NEXTENGINE, VIRTKEY, CONTROL
     VK_TAB, IDM_PREVENGINE, VIRTKEY, CONTROL, SHIFT
 END
@@ -108,6 +110,20 @@ BEGIN
     EDITTEXT        IDC_URLEDIT, 7, 20, 272, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "OK", IDOK, 172, 45, 50, 14, BS_OWNERDRAW | WS_TABSTOP
     PUSHBUTTON      "Cancel", IDCANCEL, 229, 45, 50, 14, BS_OWNERDRAW | WS_TABSTOP
+END
+
+/* Apply a friendly display name to the selected voice.  The caption is set at
+ * run time to name the voice being renamed; blank entry restores the original. */
+IDD_RENAME DIALOGEX 0, 0, 286, 84
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Rename Voice"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Friendly &name:", IDC_RENAMELBL, 7, 7, 272, 10
+    EDITTEXT        IDC_RENAMEEDIT, 7, 20, 272, 14, ES_AUTOHSCROLL
+    LTEXT           "Leave blank to use the voice's original name.", -1, 7, 38, 272, 10
+    PUSHBUTTON      "OK", IDOK, 172, 63, 50, 14, BS_OWNERDRAW | WS_TABSTOP
+    PUSHBUTTON      "Cancel", IDCANCEL, 229, 63, 50, 14, BS_OWNERDRAW | WS_TABSTOP
 END
 
 /* Shown (modeless) while the engine renders the text to an audio file.  The
