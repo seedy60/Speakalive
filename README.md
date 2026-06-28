@@ -8,7 +8,7 @@ Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little pro
 
 ## Versioning
 
-Speakalive is a retro style program through and through. To show commitment to the bit, releases have a 2022.x.x version number.
+Speakalive is a retro style program through and through. To show commitment to the bit, releases have a 2002.x.x version number.
 
 ## Speakalive features
 
