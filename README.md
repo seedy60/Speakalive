@@ -2,7 +2,7 @@
 
 At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
 
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The whole program is a single, self-contained executable of 49 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The entire program is a single, self-contained executable file of 50.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
@@ -39,13 +39,13 @@ The voice list, the sliders, and the available features update to match the engi
 
 ## Renaming voices
 
-The names speech engines give their voices can be long and unfriendly, such as "Adult Female #1, American English (TruVoice)". Speakalive lets you give any voice a short name of your own.
+The names speech engines give their voices can be quite long and unfriendly, such as "Adult Female #1, American English (TruVoice)". Speakalive lets you apply a custom name to these voices so you can easily find and refer to them.
 
-1. Select the voice you want to rename in the Voice list.
+1. Select the voice you want to rename in the Voice dropdown.
 2. Choose Speech then Rename Voice, or press Control + R.
-3. Type a friendly name, E.G. "Bridget", and press OK. Leave the box blank to go back to the voice's original name.
+3. Type a friendly name, E.G. "Scotty", "Harvey" or "Beulah", and press OK. Leave the box blank to go back to the voice's original name.
 
-From then on the friendly name is what appears in the Voice list, and the list re-sorts by it. Your custom names are remembered between sessions and stored per voice, so picking a renamed voice still selects exactly the right one.
+From then on, the friendly name is what appears in the Voice list, and the list re-sorts by it. Your custom names are remembered between sessions and stored per voice, so picking a renamed voice still selects exactly the right one.
 
 ### Backing up and restoring your names
 
