@@ -1189,7 +1189,7 @@ static void DoAbout(void)
 {
     MessageBoxA(g_main,
         APP_TITLE " version " SA_VERSION "\n"
-        "By Seedy."
+        "By Seedy.\n"
         "At the speed of light and with the spirit of the community, the Speakonia phoenix flies again.",
         "About " APP_TITLE, MB_OK | MB_ICONINFORMATION);
 }
