@@ -41,6 +41,8 @@
 #define IDM_WEBPAGE     2015
 #define IDM_STEREO      2016
 #define IDM_RENAMEVOICE 2017
+#define IDM_VOICEEXPORT 2018
+#define IDM_VOICEIMPORT 2019
 
 /* ---- Resources ---- */
 #define IDA_ACCEL       3001

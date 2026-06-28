@@ -72,6 +72,8 @@ BEGIN
         MENUITEM "Ne&xt Engine\tCtrl+Tab",         IDM_NEXTENGINE
         MENUITEM "Pre&vious Engine\tCtrl+Shift+Tab", IDM_PREVENGINE
         MENUITEM "Re&name Voice...\tCtrl+R",       IDM_RENAMEVOICE
+        MENUITEM "&Back Up Voice Names...",        IDM_VOICEEXPORT
+        MENUITEM "&Restore Voice Names...",        IDM_VOICEIMPORT
         MENUITEM SEPARATOR
         MENUITEM "Speak as &XML / SSML",           IDM_XML
         MENUITEM "&Highlight Spoken Word",         IDM_HIGHLIGHT

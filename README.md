@@ -47,6 +47,15 @@ The names speech engines give their voices can be long and unfriendly, such as "
 
 From then on the friendly name is what appears in the Voice list, and the list re-sorts by it. Your custom names are remembered between sessions and stored per voice, so picking a renamed voice still selects exactly the right one.
 
+### Backing up and restoring your names
+
+Once you have named a few voices, you can save all of those names to a file so they are not lost if you reinstall Windows or move to a new PC.
+
+* To save them, choose Speech then Back Up Voice Names, pick a location, and Speakalive writes them to a small `.savn` file.
+* To bring them back, choose Speech then Restore Voice Names and pick the file you saved. Speakalive reapplies every name in it.
+
+Restoring merges: names in the file are applied on top of whatever you already have, and any voices you have not named are left alone. You can even restore on a machine that does not have all the same voices installed yet, names for voices that are not present are simply kept until you install them.
+
 ## Speaking text
 
 1. Tab to the large Text to speak box and type or paste your text. Press Enter for new lines; press Tab to move on to the next control.

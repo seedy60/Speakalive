@@ -747,6 +747,200 @@ static void DoRenameVoice(void)
     SetStatus(friendly[0] ? "Voice renamed" : "Voice name reset to original");
 }
 
+/* ---- back up / restore custom voice names ----------------------------------
+ * The friendly names live under HKCU\Software\Speakalive\VoiceNames, one value
+ * per renamed voice (value name = original voice name, value data = friendly
+ * name).  Back Up writes them all to a small text file; Restore reads such a
+ * file back into the registry, merging - existing names are updated and any not
+ * mentioned in the file are left alone.  This lets a collection of names survive
+ * a Windows reinstall or a move to a new PC.  The file is one header line then
+ * one TAB-separated line per name:  <original name><TAB><friendly name>.  Voice
+ * names never contain a tab or a line break, so the format needs no escaping. */
+#define SA_VNBACKUP_TAG "Speakalive Voice Names"
+#define SA_VNBACKUP_HDR SA_VNBACKUP_TAG " 1"
+
+static void DoBackupVoiceNames(void)
+{
+    OPENFILENAMEA ofn;
+    char   file[MAX_PATH];
+    HKEY   k = NULL;
+    HANDLE h;
+    DWORD  i, written, count = 0, values = 0;
+    char   line[1024];
+
+    /* Nothing to do if there are no custom names - say so up front rather than
+     * popping a Save dialog that would write an empty file. */
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, SA_VOICEKEY, 0, KEY_QUERY_VALUE, &k)
+            != ERROR_SUCCESS ||
+        RegQueryInfoKeyA(k, NULL, NULL, NULL, NULL, NULL, NULL, &values,
+                         NULL, NULL, NULL, NULL) != ERROR_SUCCESS ||
+        values == 0) {
+        if (k) RegCloseKey(k);
+        SetStatus("No custom voice names to back up");
+        MessageBoxA(g_main, "There are no custom voice names to back up yet. "
+                    "Rename a voice first (Speech then Rename Voice).",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    lstrcpynA(file, "Speakalive voice names.savn", sizeof(file));
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = g_main;
+    ofn.lpstrFilter = "Speakalive voice names (*.savn)\0*.savn\0All files (*.*)\0*.*\0";
+    ofn.nFilterIndex= 1;
+    ofn.lpstrFile   = file;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrTitle  = "Back up voice names";
+    ofn.lpstrDefExt = "savn";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST |
+                OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameA(&ofn)) { RegCloseKey(k); return; }
+
+    h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        RegCloseKey(k);
+        SetStatus("Could not save the backup");
+        MessageBoxA(g_main, "Could not write the backup file.", APP_TITLE,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    WriteFile(h, SA_VNBACKUP_HDR "\r\n",
+              (DWORD)lstrlenA(SA_VNBACKUP_HDR "\r\n"), &written, NULL);
+
+    for (i = 0; ; i++) {
+        char  name[512], data[256];
+        DWORD nameLen = sizeof(name), dataLen = sizeof(data), type = 0;
+        LONG  r;
+        r = RegEnumValueA(k, i, name, &nameLen, NULL, &type,
+                          (BYTE *)data, &dataLen);
+        if (r == ERROR_NO_MORE_ITEMS) break;
+        if (r != ERROR_SUCCESS) continue;          /* skip an oversized entry */
+        if (type != REG_SZ || name[0] == 0) continue;
+        data[sizeof(data) - 1] = 0;
+        if (data[0] == 0) continue;
+        wsprintfA(line, "%s\t%s\r\n", name, data);
+        WriteFile(h, line, (DWORD)lstrlenA(line), &written, NULL);
+        count++;
+    }
+    CloseHandle(h);
+    RegCloseKey(k);
+
+    if (count == 0) {
+        SetStatus("No custom voice names to back up");
+        MessageBoxA(g_main, "There are no custom voice names to back up yet. "
+                    "Rename a voice first (Speech then Rename Voice).",
+                    APP_TITLE, MB_OK | MB_ICONINFORMATION);
+    } else {
+        char msg[128];
+        wsprintfA(msg, "Backed up %lu voice name%s.",
+                  (unsigned long)count, count == 1 ? "" : "s");
+        SetStatus("Voice names backed up");
+        MessageBoxA(g_main, msg, APP_TITLE, MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+static void DoRestoreVoiceNames(void)
+{
+    OPENFILENAMEA ofn;
+    char   file[MAX_PATH];
+    HANDLE h;
+    DWORD  size, read = 0, taglen;
+    char  *buf, *p, *limit;
+    int    sel, keepIdx = -1, count = 0;
+
+    file[0] = 0;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = g_main;
+    ofn.lpstrFilter = "Speakalive voice names (*.savn)\0*.savn\0All files (*.*)\0*.*\0";
+    ofn.nFilterIndex= 1;
+    ofn.lpstrFile   = file;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrTitle  = "Restore voice names";
+    ofn.lpstrDefExt = "savn";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY |
+                OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameA(&ofn)) return;
+
+    h = CreateFileA(file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        SetStatus("Could not open the backup");
+        MessageBoxA(g_main, "Could not open the backup file.", APP_TITLE,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size == 0 || size > 0x100000) {  /* 1 MB cap */
+        CloseHandle(h);
+        SetStatus("Not a valid backup file");
+        MessageBoxA(g_main, "That file is empty or too large to be a voice-names "
+                    "backup.", APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    buf = (char *)Mem_Alloc((SIZE_T)size + 1);
+    if (!buf) { CloseHandle(h); return; }
+    if (!ReadFile(h, buf, size, &read, NULL)) read = 0;
+    CloseHandle(h);
+    buf[read] = 0;
+
+    /* The file must start with our tag, otherwise it is not our backup. */
+    taglen = (DWORD)lstrlenA(SA_VNBACKUP_TAG);
+    if (read < taglen || memcmp(buf, SA_VNBACKUP_TAG, taglen) != 0) {
+        Mem_Free(buf);
+        SetStatus("Not a Speakalive voice-names backup");
+        MessageBoxA(g_main, "That file is not a Speakalive voice-names backup.",
+                    APP_TITLE, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    p = buf;
+    limit = buf + read;
+    while (p < limit && *p != '\n') p++;   /* skip the header line */
+    if (p < limit) p++;
+
+    /* Each remaining line: <original><TAB><friendly>. */
+    while (p < limit) {
+        char *ls = p, *le, *tab;
+        while (p < limit && *p != '\n') p++;
+        le = p;
+        if (p < limit) p++;                       /* step past '\n' */
+        if (le > ls && le[-1] == '\r') le--;      /* drop a trailing CR */
+        *le = 0;                                   /* terminate this line */
+        for (tab = ls; tab < le && *tab != '\t'; tab++) ;
+        if (tab < le) {
+            *tab = 0;                              /* split original / friendly */
+            if (ls[0] && tab[1]) {
+                VoiceFriendlySet(ls, tab + 1);
+                count++;
+            }
+        }
+    }
+    Mem_Free(buf);
+
+    /* Refresh the list so restored names appear, keeping the current voice. */
+    sel = (int)SendMessageA(g_voice, CB_GETCURSEL, 0, 0);
+    if (sel >= 0) keepIdx = (int)SendMessageA(g_voice, CB_GETITEMDATA, sel, 0);
+    PopulateVoices();
+    if (keepIdx >= 0) SelectVoiceByEngineIndex(keepIdx);
+
+    if (count > 0) {
+        char msg[192];
+        wsprintfA(msg, "Restored %d voice name%s. Names for voices that are not "
+                  "installed here are kept for when they are.",
+                  count, count == 1 ? "" : "s");
+        SetStatus("Voice names restored");
+        MessageBoxA(g_main, msg, APP_TITLE, MB_OK | MB_ICONINFORMATION);
+    } else {
+        SetStatus("No voice names in that file");
+        MessageBoxA(g_main, "That backup did not contain any voice names.",
+                    APP_TITLE, MB_OK | MB_ICONWARNING);
+    }
+}
+
 /* Remove the transient save-notification tray icon if it is showing. */
 static void RemoveTrayIcon(void)
 {
@@ -1745,6 +1939,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_SAVETEXT:              DoSaveText();   return 0;
         case IDM_WEBPAGE:               DoWebPage();    return 0;
         case IDM_RENAMEVOICE:           DoRenameVoice(); return 0;
+        case IDM_VOICEEXPORT:           DoBackupVoiceNames();  return 0;
+        case IDM_VOICEIMPORT:           DoRestoreVoiceNames(); return 0;
         case IDM_ABOUT:                 DoAbout();      return 0;
         case IDM_EXIT:  SendMessageA(hwnd, WM_CLOSE, 0, 0); return 0;
         case IDM_XML:
