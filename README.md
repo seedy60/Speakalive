@@ -2,7 +2,7 @@
 
 At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
 
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The entire program is a single, self-contained executable file of 50.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The entire program is a single, self-contained executable file of 56 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
@@ -19,6 +19,8 @@ Speakalive speaks your text through whichever speech engines are installed on yo
 ### Compiled
 
 Speakalive is a single, portable `Speakalive.exe` with no dependencies beyond the operating system itself, not even the Visual C++ runtime. Grab `Speakalive.exe` from the releases page (or build it yourself, see Compiling below), put it wherever you like, and run it. There is nothing to install. The same file runs on Windows 2000, XP, Vista, 7, 8, 8.1, 10, and 11.
+
+Only one copy of Speakalive runs at a time. If it is already open and you launch it again, the running window is brought to the front instead of a second copy starting, so you never end up with two of them fighting over the speakers.
 
 * On Windows 10 and 11 you get all three engines: SAPI 4 (if installed), SAPI 5, and OneCore.
 * On Windows 8.1 down to Windows XP you get SAPI 4 (if installed) and SAPI 5.
@@ -80,6 +82,8 @@ Speakalive can pass speech markup straight through to the engine so you can cont
 When Speak as XML / SSML is on, Speakalive checks your markup before it speaks and, if something is wrong, tells you exactly what: an unclosed tag, a missing or extra quote mark, mismatched tags, or a `<` where a `>` was meant. You get a clear message naming the problem tag instead of a passage that silently refuses to speak.
 
 With Speak as XML / SSML turned off, your text is read out exactly as written and any special characters are spoken literally.
+
+You do not have to memorise the tags. Choose Speech then Available Tags to open a list of the tags the engine you are currently using understands, each with a short description of what it does. Move through the list with the arrow keys and press Control + C to copy the selected tag to the clipboard, then paste it into your text and fill in your own values. The list changes to match the engine, so it shows SAPI 4 control tags, SAPI 5 XML tags, or OneCore SSML as appropriate.
 
 ## Saving audio
 

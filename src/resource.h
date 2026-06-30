@@ -43,6 +43,7 @@
 #define IDM_RENAMEVOICE 2017
 #define IDM_VOICEEXPORT 2018
 #define IDM_VOICEIMPORT 2019
+#define IDM_TAGS        2020
 
 /* ---- Resources ---- */
 #define IDA_ACCEL       3001
@@ -63,5 +64,10 @@
 #define IDD_RENAME      6007
 #define IDC_RENAMELBL   6008
 #define IDC_RENAMEEDIT  6009
+
+/* ---- "Available Tags" dialog ---- */
+#define IDD_TAGS        6010
+#define IDC_TAGSHINT    6011
+#define IDC_TAGLIST     6012
 
 #endif /* SPEAKALIVE_RESOURCE_H */

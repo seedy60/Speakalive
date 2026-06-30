@@ -401,6 +401,24 @@ static const char *CheckMarkup(const char *t)
     return NULL;
 }
 
+/* Does the text actually contain a markup tag (an element, processing
+ * instruction, or declaration)?  Used so a failed speak only blames the markup
+ * when there is some - a plain sentence that a voice simply cannot say is a
+ * voice problem, not a tag-support one, even with XML/SSML mode on. */
+static BOOL TextHasMarkup(const char *t)
+{
+    const char *p;
+    for (p = t; *p; p++) {
+        if (p[0] == '<') {
+            char c = p[1];
+            if (c == '/' || c == '?' || c == '!' ||
+                (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void DoSpeak(void)
 {
     char *text;
@@ -429,10 +447,11 @@ static void DoSpeak(void)
         SetStatus("Speaking");
     } else {
         /* A bare error beep tells a screen-reader user nothing, so show an
-         * announced message.  The markup (if any) already passed the syntax
-         * check above, so a failure here is a content/voice problem. */
+         * announced message.  Only blame the markup when the text actually has
+         * some (it already passed the syntax check above); a plain passage that
+         * fails is a content/voice problem even with XML/SSML mode on. */
         SetStatus("Speech failed");
-        MessageBoxA(g_main, g_xmlMode
+        MessageBoxA(g_main, (g_xmlMode && TextHasMarkup(text))
             ? "The text could not be spoken. The markup is well-formed, but a tag "
               "or value may not be supported by the selected voice."
             : "The text could not be spoken. The selected voice was unable to "
@@ -939,6 +958,246 @@ static void DoRestoreVoiceNames(void)
         MessageBoxA(g_main, "That backup did not contain any voice names.",
                     APP_TITLE, MB_OK | MB_ICONWARNING);
     }
+}
+
+/* ---- available markup tags ------------------------------------------------
+ * A reference list of the control tags / markup each engine understands, shown
+ * in a list view from which the user can copy a tag with Control + C and paste
+ * it into their text.  The sample values in each tag are just illustrative; the
+ * user edits them after pasting.  Support varies a little from voice to voice. */
+typedef struct { const char *tag; const char *desc; } TagInfo;
+
+/* SAPI 4 uses backslash control tags embedded in the text. */
+static const TagInfo g_tagsSapi4[] = {
+    { "\\Spd=150\\",      "Set the speaking speed in words per minute." },
+    { "\\Pit=100\\",      "Set the baseline pitch in hertz." },
+    { "\\Vol=65535\\",    "Set the volume, from 0 (silent) to 65535 (loudest)." },
+    { "\\Pau=500\\",      "Pause for the given number of milliseconds." },
+    { "\\Rst\\",          "Reset speed, pitch and volume to the voice's defaults." },
+    { "\\Mrk=1\\",        "Place a numbered bookmark at this point in the text." },
+    { "\\Chr=\"Normal\"\\", "Set the voice's character or style, e.g. Normal or Monotone." },
+    { "\\Emp\\",          "Emphasise the word that follows." },
+};
+
+/* SAPI 5 uses Microsoft's XML TTS tags. */
+static const TagInfo g_tagsSapi5[] = {
+    { "<rate speed=\"-3\"/>",       "Change the speed, from -10 (slowest) to 10 (fastest)." },
+    { "<rate absspeed=\"0\"/>",     "Set the absolute speed, from -10 to 10." },
+    { "<pitch middle=\"3\"/>",      "Change the pitch, from -10 (lowest) to 10 (highest)." },
+    { "<volume level=\"80\"/>",     "Set the volume, from 0 to 100." },
+    { "<emph>word</emph>",          "Emphasise the enclosed words." },
+    { "<silence msec=\"500\"/>",    "Insert the given number of milliseconds of silence." },
+    { "<spell>text</spell>",        "Speak the enclosed text one letter at a time." },
+    { "<bookmark mark=\"name\"/>",  "Insert a named bookmark at this point." },
+    { "<pron sym=\"h eh l ow\"/>",  "Speak using the given phoneme symbols." },
+    { "<voice required=\"Name=Microsoft Mary\">text</voice>", "Speak the enclosed text in another voice." },
+};
+
+/* OneCore uses W3C SSML. */
+static const TagInfo g_tagsOnecore[] = {
+    { "<speak version=\"1.0\" xml:lang=\"en-US\">text</speak>", "Wrap the whole document (required for SSML)." },
+    { "<prosody rate=\"slow\" pitch=\"+2st\" volume=\"loud\">text</prosody>", "Change rate, pitch and/or volume." },
+    { "<break time=\"500ms\"/>",    "Pause for the given length of time." },
+    { "<emphasis level=\"strong\">text</emphasis>", "Emphasise the enclosed text." },
+    { "<say-as interpret-as=\"characters\">text</say-as>", "Control how text is read, e.g. characters, digits or date." },
+    { "<voice name=\"Microsoft Zira\">text</voice>", "Speak the enclosed text in another voice." },
+    { "<phoneme alphabet=\"ipa\" ph=\"...\">text</phoneme>", "Pronounce the text using the given phonemes." },
+    { "<sub alias=\"World Wide Web\">WWW</sub>", "Speak a substitute for the written text." },
+    { "<p>text</p>",                "Mark a paragraph." },
+    { "<s>text</s>",                "Mark a sentence." },
+};
+
+typedef struct { const TagInfo *tags; int count; const char *title; } TagsCtx;
+
+/* Put a string on the clipboard as plain text. */
+static void ClipboardSetText(HWND owner, const char *s)
+{
+    SIZE_T  len = (SIZE_T)lstrlenA(s) + 1;
+    HGLOBAL hg;
+    if (!OpenClipboard(owner)) return;
+    EmptyClipboard();
+    hg = GlobalAlloc(GMEM_MOVEABLE, len);
+    if (hg) {
+        char *p = (char *)GlobalLock(hg);
+        if (p) {
+            lstrcpynA(p, s, (int)len);
+            GlobalUnlock(hg);
+            SetClipboardData(CF_TEXT, hg);
+        } else {
+            GlobalFree(hg);
+        }
+    }
+    CloseClipboard();
+}
+
+/* Copy the Tag column of every selected list row, one per line. */
+static void CopySelectedTags(HWND list)
+{
+    char buf[2048], item[256];
+    int  used = 0, i = -1, any = 0;
+    buf[0] = 0;
+    for (;;) {
+        int l;
+        i = ListView_GetNextItem(list, i, LVNI_SELECTED);
+        if (i < 0) break;
+        item[0] = 0;
+        ListView_GetItemText(list, i, 0, item, sizeof(item));
+        if (any && used + 2 < (int)sizeof(buf)) {
+            buf[used++] = '\r'; buf[used++] = '\n'; buf[used] = 0;
+        }
+        l = lstrlenA(item);
+        if (used + l < (int)sizeof(buf)) {
+            lstrcpynA(buf + used, item, (int)sizeof(buf) - used);
+            used += l;
+        }
+        any = 1;
+    }
+    if (any) ClipboardSetText(list, buf);
+}
+
+/* In dark mode the list's column-header strip is a separate control that ignores
+ * the list's colours and would stay system-light.  We subclass the list so we
+ * receive the header's NM_CUSTOMDRAW (it is sent to the header's parent, the
+ * list, not the dialog) and paint the header dark ourselves.  Only installed
+ * when dark, so it always draws dark.  The original proc is kept in the list's
+ * GWLP_USERDATA. */
+static LRESULT CALLBACK TagsListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    WNDPROC orig = (WNDPROC)(LONG_PTR)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    if (msg == WM_NOTIFY) {
+        NMHDR *nh = (NMHDR *)lp;
+        /* Only the header's custom draw - not, say, the label-tip tooltip's. */
+        if (nh->code == NM_CUSTOMDRAW && nh->hwndFrom == ListView_GetHeader(hwnd)) {
+            NMCUSTOMDRAW *cd = (NMCUSTOMDRAW *)lp;
+            if (cd->dwDrawStage == CDDS_PREPAINT) {
+                FillRect(cd->hdc, &cd->rc, g_brBg);   /* base + any gap past the last column */
+                return CDRF_NOTIFYITEMDRAW;
+            }
+            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
+                HDC     dc = cd->hdc;
+                RECT    rc = cd->rc, div;
+                HBRUSH  divb = CreateSolidBrush(RGB(70, 70, 70));
+                HDITEMA hi;
+                char    text[128];
+                FillRect(dc, &rc, g_brBg);
+                div = rc; div.left = div.right  - 1; FillRect(dc, &div, divb);  /* column divider */
+                div = rc; div.top  = div.bottom - 1; FillRect(dc, &div, divb);  /* base line      */
+                DeleteObject(divb);
+                text[0] = 0;
+                ZeroMemory(&hi, sizeof(hi));
+                hi.mask = HDI_TEXT; hi.pszText = text; hi.cchTextMax = sizeof(text);
+                SendMessageA(nh->hwndFrom, HDM_GETITEMA, cd->dwItemSpec, (LPARAM)&hi);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, DARK_TXT);
+                rc.left += 6; rc.right -= 4;
+                DrawTextA(dc, text, -1, &rc,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                return CDRF_SKIPDEFAULT;
+            }
+            return CDRF_DODEFAULT;
+        }
+    } else if (msg == WM_NCDESTROY) {
+        SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);   /* unhook */
+    }
+    return CallWindowProcA(orig, hwnd, msg, wp, lp);
+}
+
+static INT_PTR CALLBACK TagsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG: {
+        TagsCtx *c   = (TagsCtx *)lp;
+        HWND     list = GetDlgItem(dlg, IDC_TAGLIST);
+        LVCOLUMNA col;
+        int i;
+
+        if (c->title) SetWindowTextA(dlg, c->title);
+        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP);
+
+        ZeroMemory(&col, sizeof(col));
+        col.mask     = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.cx       = 175; col.iSubItem = 0; col.pszText = "Tag";
+        ListView_InsertColumn(list, 0, &col);
+        col.cx       = 320; col.iSubItem = 1; col.pszText = "What it does";
+        ListView_InsertColumn(list, 1, &col);
+
+        for (i = 0; i < c->count; i++) {
+            LVITEMA it;
+            ZeroMemory(&it, sizeof(it));
+            it.mask = LVIF_TEXT; it.iItem = i; it.iSubItem = 0;
+            it.pszText = (char *)c->tags[i].tag;
+            ListView_InsertItem(list, &it);
+            ListView_SetItemText(list, i, 1, (char *)c->tags[i].desc);
+        }
+
+        if (g_dark) {
+            WNDPROC origProc;
+            ListView_SetBkColor(list, DARK_CTL);
+            ListView_SetTextBkColor(list, DARK_CTL);
+            ListView_SetTextColor(list, DARK_TXT);
+            /* Hand-draw the column header dark (see TagsListProc). */
+            origProc = (WNDPROC)(LONG_PTR)SetWindowLongPtrA(list, GWLP_WNDPROC,
+                                                            (LONG_PTR)TagsListProc);
+            SetWindowLongPtrA(list, GWLP_USERDATA, (LONG_PTR)origProc);
+            InvalidateRect(ListView_GetHeader(list), NULL, TRUE);
+        }
+        ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
+        SetTitleBarDark(dlg, g_dark);
+        SetFocus(list);
+        return FALSE;
+    }
+
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        if (g_dark) {
+            SetTextColor((HDC)wp, DARK_TXT);
+            SetBkColor((HDC)wp, DARK_BG);
+            return (INT_PTR)g_brBg;
+        }
+        break;
+    case WM_DRAWITEM:
+        DrawButton((const DRAWITEMSTRUCT *)lp);
+        return TRUE;
+
+    case WM_NOTIFY: {
+        NMHDR *nh = (NMHDR *)lp;
+        if (nh->idFrom == IDC_TAGLIST && nh->code == LVN_KEYDOWN) {
+            NMLVKEYDOWN *kd = (NMLVKEYDOWN *)lp;
+            if (kd->wVKey == 'C' && (GetKeyState(VK_CONTROL) & 0x8000))
+                CopySelectedTags(nh->hwndFrom);
+        }
+        break;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) {
+            EndDialog(dlg, LOWORD(wp));
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+/* Show the markup-tag reference for the engine that is currently selected. */
+static void DoShowTags(void)
+{
+    TagsCtx ctx;
+    char    title[80];
+    if (!g_engine) { MessageBeep(MB_ICONASTERISK); return; }
+
+    if (lstrcmpA(g_engine->id, "sapi4") == 0) {
+        ctx.tags = g_tagsSapi4; ctx.count = (int)(sizeof(g_tagsSapi4) / sizeof(g_tagsSapi4[0]));
+    } else if (lstrcmpA(g_engine->id, "onecore") == 0) {
+        ctx.tags = g_tagsOnecore; ctx.count = (int)(sizeof(g_tagsOnecore) / sizeof(g_tagsOnecore[0]));
+    } else {   /* SAPI 5 (and any future XML engine) */
+        ctx.tags = g_tagsSapi5; ctx.count = (int)(sizeof(g_tagsSapi5) / sizeof(g_tagsSapi5[0]));
+    }
+    wsprintfA(title, "%s markup tags", g_engine->display);
+    ctx.title = title;
+    DialogBoxParamA(g_inst, MAKEINTRESOURCEA(IDD_TAGS), g_main, TagsDlgProc, (LPARAM)&ctx);
 }
 
 /* Remove the transient save-notification tray icon if it is showing. */
@@ -1941,6 +2200,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_RENAMEVOICE:           DoRenameVoice(); return 0;
         case IDM_VOICEEXPORT:           DoBackupVoiceNames();  return 0;
         case IDM_VOICEIMPORT:           DoRestoreVoiceNames(); return 0;
+        case IDM_TAGS:                  DoShowTags();   return 0;
         case IDM_ABOUT:                 DoAbout();      return 0;
         case IDM_EXIT:  SendMessageA(hwnd, WM_CLOSE, 0, 0); return 0;
         case IDM_XML:
@@ -2072,13 +2332,30 @@ int SpeakaliveMain(void)
     INITCOMMONCONTROLSEX icc;
     HACCEL accel;
     MSG msg;
+    HANDLE single;
 
     g_inst = GetModuleHandleA(NULL);
+
+    /* Single instance: if another Speakalive is already running in this session,
+     * bring its window to the front and quietly exit.  The mutex handle is held
+     * open for our whole run (released automatically when we exit) so later
+     * launches keep seeing ERROR_ALREADY_EXISTS. */
+    single = CreateMutexA(NULL, FALSE, "SpeakaliveSingleInstance.cdfn");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND prev = FindWindowA(APP_CLASS, NULL);
+        if (prev) {
+            if (IsIconic(prev)) ShowWindow(prev, SW_RESTORE);
+            SetForegroundWindow(prev);
+        }
+        CloseHandle(single);
+        return 0;
+    }
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     icc.dwSize = sizeof(icc);
-    icc.dwICC  = ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_PROGRESS_CLASS;
+    icc.dwICC  = ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_PROGRESS_CLASS |
+                 ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&icc);
 
     Engines_Init();
@@ -2123,5 +2400,6 @@ int SpeakaliveMain(void)
     }
 
     CoUninitialize();
+    if (single) CloseHandle(single);
     return (int)msg.wParam;
 }
