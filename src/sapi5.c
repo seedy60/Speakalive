@@ -24,7 +24,7 @@ typedef struct {
     int       vol;      /* 0..100  */
     int       speaking;
     int       prefixLen;/* wchars of injected <pitch> markup, for offset fix */
-    int       outputIsSpeaker; /* live output is currently bound to spkAudio    */
+    int       outputMode; /* live output: 0 unbound, 1 default/adapting, 2 fixed 48k */
     HWND      notify;
 } Sapi5;
 
@@ -206,7 +206,7 @@ static BOOL S5_Init(SpeechEngine *e)
     /* The live speaker output is bound lazily, on the first Speak (see S5_Speak),
      * so neither start-up, voice changes, nor file saves pay to reopen the audio
      * device - which is slow for voices with an unusual native sample rate. */
-    s->outputIsSpeaker = 0;
+    s->outputMode = 0;
     ApplyInterest(s);   /* word-boundary events only if highlighting is on */
     return TRUE;
 }
@@ -240,7 +240,7 @@ static BOOL S5_SetVoice(SpeechEngine *e, int index)
         return FALSE;
     /* The new voice may have a different native rate; rebind the output on the
      * next Speak rather than reopening the audio device here. */
-    s->outputIsSpeaker = 0;
+    s->outputMode = 0;
     return TRUE;
 }
 
@@ -290,6 +290,23 @@ static void BindSpeakerOutput(Sapi5 *s)
         ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* fallback: native, adapting */
 }
 
+/* Does the text contain a <voice> SSML switch (case-insensitive)?  Only then do
+ * we need the fixed 48 kHz output that stops a switched-in higher-rate voice
+ * being downsampled.  The '\0' terminator fails every letter test, so reading
+ * ahead never runs off the end of a short string. */
+static BOOL HasVoiceSwitch(const char *t)
+{
+    const char *p;
+    for (p = t; *p; p++) {
+        if (p[0] == '<' &&
+            (p[1] == 'v' || p[1] == 'V') && (p[2] == 'o' || p[2] == 'O') &&
+            (p[3] == 'i' || p[3] == 'I') && (p[4] == 'c' || p[4] == 'C') &&
+            (p[5] == 'e' || p[5] == 'E'))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
 {
     Sapi5 *s = (Sapi5 *)e->priv;
@@ -303,12 +320,21 @@ static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     if (notify)
         ISpVoice_SetNotifyWindowMessage(s->voice, notify, WM_SA_SAPI5EVENT, 0, 0);
 
-    /* Bind the speaker output now (the device open a file save deliberately
-     * skips), only when not already bound so back-to-back speaks don't reopen
-     * the device.  See BindSpeakerOutput for the fixed-48 kHz rationale. */
-    if (!s->outputIsSpeaker) {
-        BindSpeakerOutput(s);
-        s->outputIsSpeaker = 1;
+    /* Choose the live output.  The fixed 48 kHz device is only needed to keep a
+     * mid-utterance <voice> switch from being downsampled; forcing it on every
+     * utterance puts a resampler in the audio path that makes some voices (the
+     * IVONA ones) emit static when paused and resumed.  So use it only when the
+     * text actually switches voice, and SAPI's default output - which adapts to
+     * the voice's own rate and pauses/resumes cleanly - otherwise.  Rebound only
+     * when the required mode changes, so back-to-back speaks don't reopen the
+     * device (a file save leaves outputMode 0, so the next speak rebinds). */
+    {
+        int want = (asXml && HasVoiceSwitch(text)) ? 2 : 1;
+        if (s->outputMode != want) {
+            if (want == 2) BindSpeakerOutput(s);
+            else ISpVoice_SetOutput(s->voice, NULL, TRUE);
+            s->outputMode = want;
+        }
     }
 
     ApplyParams(s);
@@ -395,7 +421,7 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
                                   &SPDFID_WaveFormatEx, &wfx, 0);
         if (SUCCEEDED(hr)) {
             ISpVoice_SetOutput(s->voice, (IUnknown *)stream, TRUE);
-            s->outputIsSpeaker = 0;   /* next live Speak rebinds the speakers */
+            s->outputMode = 0;   /* next live Speak rebinds the speakers */
             ApplyParams(s);
             wide = BuildSpeak(s, text, asXml, &xmlFlag);
             if (wide) {
