@@ -24,7 +24,9 @@ typedef struct {
     int       vol;      /* 0..100  */
     int       speaking;
     int       prefixLen;/* wchars of injected <pitch> markup, for offset fix */
-    int       outputMode; /* live output: 0 unbound, 1 default/adapting, 2 fixed 48k */
+    int       outBound;   /* live output bound? 0 = (re)bind on next Speak       */
+    UINT      outDev;     /* device id it was bound to (rebind if this changes)   */
+    int       outFixed;   /* bound with the fixed 48 kHz format (for <voice>)     */
     HWND      notify;
 } Sapi5;
 
@@ -206,7 +208,7 @@ static BOOL S5_Init(SpeechEngine *e)
     /* The live speaker output is bound lazily, on the first Speak (see S5_Speak),
      * so neither start-up, voice changes, nor file saves pay to reopen the audio
      * device - which is slow for voices with an unusual native sample rate. */
-    s->outputMode = 0;
+    s->outBound = 0;
     ApplyInterest(s);   /* word-boundary events only if highlighting is on */
     return TRUE;
 }
@@ -240,7 +242,7 @@ static BOOL S5_SetVoice(SpeechEngine *e, int index)
         return FALSE;
     /* The new voice may have a different native rate; rebind the output on the
      * next Speak rather than reopening the audio device here. */
-    s->outputMode = 0;
+    s->outBound = 0;
     return TRUE;
 }
 
@@ -263,31 +265,46 @@ static void S5_SetVolume(SpeechEngine *e, int vol)
     if (s->voice) ISpVoice_SetVolume(s->voice, (USHORT)vol);
 }
 
-/* Bind live speech to a shared speaker output fixed at 48 kHz (created once).
- * Using a fixed high rate rather than the selected voice's native rate means a
- * voice switched in mid-utterance by a <voice> SSML tag is NOT downsampled to
- * the UI voice's rate: any voice up to 48 kHz plays at full quality, lower ones
- * are upsampled (which loses nothing).  Falls back to the default adapting
- * output if the fixed device cannot be created. */
-static void BindSpeakerOutput(Sapi5 *s)
+/* Bind the live speaker output for one utterance.
+ *   dev      AUDIO_DEV_DEFAULT for the system default, else a waveOut index.
+ *   fixed48  non-zero to force a 48 kHz output so a voice switched in with a
+ *            <voice> SSML tag is not downsampled to the UI voice's rate.
+ * The default-device + adaptive case uses SAPI's own output (no extra device
+ * object): it plays at the voice's native rate and pauses/resumes cleanly - the
+ * fix for IVONA voices crackling on resume.  Any other case needs an
+ * ISpMMSysAudio, still adaptive where possible, fixed 48 kHz only for <voice>.
+ * The device object is recreated on each rebind - and rebinds happen only when
+ * the device or the fixed/adaptive need actually changes, not between
+ * back-to-back speaks - so we never reconfigure a device that is in use. */
+static void BindOutput(Sapi5 *s, UINT dev, int fixed48)
 {
-    if (!s->spkAudio &&
-        SUCCEEDED(CoCreateInstance(&CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
+    if (s->spkAudio) { ISpMMSysAudio_Release(s->spkAudio); s->spkAudio = NULL; }
+
+    if (dev == AUDIO_DEV_DEFAULT && !fixed48) {
+        ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* default device, adapts */
+        return;
+    }
+    if (SUCCEEDED(CoCreateInstance(&CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
                                    &IID_ISpMMSysAudio, (void **)&s->spkAudio)) &&
         s->spkAudio) {
-        WAVEFORMATEX wfx;
-        ZeroMemory(&wfx, sizeof(wfx));
-        wfx.wFormatTag      = WAVE_FORMAT_PCM;
-        wfx.nChannels       = 1;
-        wfx.nSamplesPerSec  = 48000;
-        wfx.wBitsPerSample  = 16;
-        wfx.nBlockAlign     = 2;
-        wfx.nAvgBytesPerSec = 96000;
-        ISpMMSysAudio_SetFormat(s->spkAudio, &SPDFID_WaveFormatEx, &wfx);
+        if (dev != AUDIO_DEV_DEFAULT)
+            ISpMMSysAudio_SetDeviceId(s->spkAudio, dev);
+        if (fixed48) {
+            WAVEFORMATEX wfx;
+            ZeroMemory(&wfx, sizeof(wfx));
+            wfx.wFormatTag      = WAVE_FORMAT_PCM;
+            wfx.nChannels       = 1;
+            wfx.nSamplesPerSec  = 48000;
+            wfx.wBitsPerSample  = 16;
+            wfx.nBlockAlign     = 2;
+            wfx.nAvgBytesPerSec = 96000;
+            ISpMMSysAudio_SetFormat(s->spkAudio, &SPDFID_WaveFormatEx, &wfx);
+        }
     }
     if (!s->spkAudio ||
-        FAILED(ISpVoice_SetOutput(s->voice, (IUnknown *)s->spkAudio, FALSE)))
-        ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* fallback: native, adapting */
+        FAILED(ISpVoice_SetOutput(s->voice, (IUnknown *)s->spkAudio,
+                                  fixed48 ? FALSE : TRUE)))
+        ISpVoice_SetOutput(s->voice, NULL, TRUE);   /* fallback: default, adapting */
 }
 
 /* Does the text contain a <voice> SSML switch (case-insensitive)?  Only then do
@@ -320,26 +337,28 @@ static BOOL S5_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     if (notify)
         ISpVoice_SetNotifyWindowMessage(s->voice, notify, WM_SA_SAPI5EVENT, 0, 0);
 
-    /* Choose the live output.  The fixed 48 kHz device is only needed to keep a
-     * mid-utterance <voice> switch from being downsampled; forcing it on every
-     * utterance puts a resampler in the audio path that makes some voices (the
-     * IVONA ones) emit static when paused and resumed.  So use it only when the
-     * text actually switches voice, and SAPI's default output - which adapts to
-     * the voice's own rate and pauses/resumes cleanly - otherwise.  Rebound only
-     * when the required mode changes, so back-to-back speaks don't reopen the
-     * device (a file save leaves outputMode 0, so the next speak rebinds). */
+    /* Choose the live output for this utterance: the chosen device, and the
+     * fixed 48 kHz format only when the text switches voice (see BindOutput).
+     * Rebind only when the device or that need changes, so back-to-back speaks
+     * don't reopen the device (a file save leaves outBound 0 to force a rebind). */
     {
-        int want = (asXml && HasVoiceSwitch(text)) ? 2 : 1;
-        if (s->outputMode != want) {
-            if (want == 2) BindSpeakerOutput(s);
-            else ISpVoice_SetOutput(s->voice, NULL, TRUE);
-            s->outputMode = want;
+        UINT dev     = Audio_DeviceId();
+        int  fixed48 = (asXml && HasVoiceSwitch(text)) ? 1 : 0;
+        if (!s->outBound || s->outDev != dev || s->outFixed != fixed48) {
+            BindOutput(s, dev, fixed48);
+            s->outBound = 1; s->outDev = dev; s->outFixed = fixed48;
         }
     }
 
     ApplyParams(s);
     wide = BuildSpeak(s, text, asXml, &xmlFlag);
     if (!wide) return FALSE;
+
+    /* If a previous utterance was left paused, clear that first: a paused voice
+     * will neither purge its queue nor start new speech (the same reason S5_Stop
+     * resumes before purging).  Without this, pressing Speak (F5) while paused
+     * leaves the voice stuck paused and wedges F6 pause/resume until a Stop. */
+    ISpVoice_Resume(s->voice);
 
     s->speaking = 1;
     hr = ISpVoice_Speak(s->voice, wide,
@@ -421,7 +440,7 @@ static BOOL S5_Save(SpeechEngine *e, const char *text, BOOL asXml,
                                   &SPDFID_WaveFormatEx, &wfx, 0);
         if (SUCCEEDED(hr)) {
             ISpVoice_SetOutput(s->voice, (IUnknown *)stream, TRUE);
-            s->outputMode = 0;   /* next live Speak rebinds the speakers */
+            s->outBound = 0;   /* next live Speak rebinds the speakers */
             ApplyParams(s);
             wide = BuildSpeak(s, text, asXml, &xmlFlag);
             if (wide) {

@@ -45,6 +45,11 @@
 #define IDM_VOICEIMPORT 2019
 #define IDM_TAGS        2020
 
+/* Audio Output Device submenu: 2100 = Default, 2100 + 1 + i = waveOut device i.
+ * The submenu is built at run time, so these are a reserved command range. */
+#define IDM_AUDIODEV_BASE 2100
+#define IDM_AUDIODEV_MAX  64
+
 /* ---- Resources ---- */
 #define IDA_ACCEL       3001
 #define IDI_MAIN        4001

@@ -9,8 +9,8 @@
  *
  * Flow: build SSML (rate/pitch via <prosody>) -> SynthesizeSsmlToStreamAsync
  * -> poll the async op -> read the resulting WAV stream into memory -> play it
- * through MCI (which gives free pause/resume/stop) or hand it to audiofile.c
- * for "save as".
+ * through waveOut (which can target a chosen output device) or hand it to
+ * audiofile.c for "save as".
  */
 #include <windows.h>
 #include <mmsystem.h>
@@ -46,8 +46,6 @@ typedef HRESULT (WINAPI *PFN_WindowsDeleteString)(HSTRING);
 typedef const WCHAR * (WINAPI *PFN_WindowsGetStringRawBuffer)(HSTRING, UINT32 *);
 typedef HRESULT (WINAPI *PFN_CreateStreamOverRAS)(IUnknown *, REFIID, void **);
 
-#define MCI_ALIAS "SpeakaliveOC"
-
 typedef struct {
     HMODULE combase, shcore;
     PFN_RoActivateInstance       RoActivate;
@@ -62,9 +60,11 @@ typedef struct {
     int      rate;     /* -10..10 */
     int      pitch;    /* -10..10 */
     int      speaking;
-    int      opened;
-    volatile LONG playGen;     /* bumped per request; worker drops stale jobs */
-    char    *tempWav;
+    HWAVEOUT hwo;              /* waveOut playback handle (NULL = idle)          */
+    WAVEHDR  whdr;             /* the single buffer submitted to waveOut         */
+    BYTE    *playPcm;          /* PCM being played (owned while hwo is open)      */
+    int      paused;           /* playback paused via waveOutPause                */
+    volatile LONG playGen;     /* bumped per request; worker drops stale jobs     */
     HWND     notify;
     char     curLang[16];      /* BCP-47 tag of the selected voice (SSML xml:lang) */
     /* Background synthesis/playback so the UI never blocks. */
@@ -312,19 +312,22 @@ static BOOL Synthesize(OneCore *oc, const char *text, BOOL asXml,
 
 /* ---- background synthesis + MCI playback ----------------------------- */
 
-static void CloseMci(OneCore *oc)
+static void StopWaveOut(OneCore *oc)
 {
-    if (oc->opened) {
-        mciSendStringA("stop " MCI_ALIAS, NULL, 0, NULL);
-        mciSendStringA("close " MCI_ALIAS, NULL, 0, NULL);
-        oc->opened = 0;
+    if (oc->hwo) {
+        waveOutReset(oc->hwo);       /* stop playback, mark the buffer done */
+        waveOutUnprepareHeader(oc->hwo, &oc->whdr, sizeof(oc->whdr));
+        waveOutClose(oc->hwo);
+        oc->hwo = NULL;
     }
+    if (oc->playPcm) { Mem_Free(oc->playPcm); oc->playPcm = NULL; }
+    oc->paused = 0;
 }
 
 /* The persistent worker thread only does the slow part - synthesis - so the UI
  * thread never blocks.  The finished WAV is handed back to the UI thread (via
- * WM_SA_OCPLAY) which owns MCI playback, because MCI can only be controlled
- * (pause/resume/stop) from the thread that opened the device. */
+ * WM_SA_OCPLAY), which owns playback, so the waveOut handle and its
+ * pause/resume/stop all live on one thread; the poll thread only reads flags. */
 static DWORD WINAPI SpeakWorker(LPVOID param)
 {
     OneCore *oc = (OneCore *)param;
@@ -378,18 +381,17 @@ static DWORD WINAPI SpeakWorker(LPVOID param)
     return 0;
 }
 
-/* Watches MCI for natural end-of-playback and signals the UI when done. */
+/* Watches waveOut for natural end-of-playback and signals the UI when done.
+ * It only reads the buffer's done flag and the handle (both gated by playGen);
+ * the UI thread owns every waveOut call, so there is nothing to close here. */
 static DWORD WINAPI PollThread(LPVOID param)
 {
     LONG myGen = (LONG)(INT_PTR)param;
-    char mode[32];
     for (;;) {
         Sleep(120);
-        if (g_oc.playGen != myGen) return 0;     /* superseded */
-        mode[0] = 0;
-        if (mciSendStringA("status " MCI_ALIAS " mode", mode, sizeof(mode), NULL) != 0)
-            break;
-        if (lstrcmpiA(mode, "stopped") == 0) break;   /* finished naturally */
+        if (g_oc.playGen != myGen) return 0;             /* superseded  */
+        if (!g_oc.hwo) break;                            /* stopped     */
+        if (g_oc.whdr.dwFlags & WHDR_DONE) break;        /* finished    */
     }
     if (g_oc.playGen == myGen) {
         g_oc.speaking = 0;
@@ -401,28 +403,49 @@ static DWORD WINAPI PollThread(LPVOID param)
 /* Called on the UI thread (WM_SA_OCPLAY) once the worker has a WAV ready. */
 void OneCore_DoPlay(char *tmp, long gen)
 {
-    OneCore *oc = &g_oc;
-    char   cmd[MAX_PATH + 64];
-    HANDLE th;
+    OneCore     *oc = &g_oc;
+    BYTE        *pcm = NULL;
+    DWORD        pcmLen = 0;
+    WAVEFORMATEX fmt;
+    HANDLE       th;
 
     if (!tmp) return;
     if (oc->playGen != gen) { DeleteFileA(tmp); Mem_Free(tmp); return; }  /* superseded */
 
-    CloseMci(oc);
-    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); }
-    oc->tempWav = tmp;
+    StopWaveOut(oc);   /* stop and close any current playback */
 
-    lstrcpyA(cmd, "open \"");
-    lstrcatA(cmd, tmp);
-    lstrcatA(cmd, "\" type waveaudio alias " MCI_ALIAS);
-    if (mciSendStringA(cmd, NULL, 0, NULL) != 0) {
-        DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL;
+    /* Load the rendered WAV into memory; the temp file is then finished with.
+     * Playing from memory (not the file) lets us delete it right away. */
+    if (!AudioFile_ReadWavPcm(tmp, &pcm, &pcmLen, &fmt) || !pcm || pcmLen == 0) {
+        DeleteFileA(tmp); Mem_Free(tmp);
+        if (pcm) Mem_Free(pcm);
         oc->speaking = 0;
         if (oc->notify) PostMessageA(oc->notify, WM_SA_DONE, 0, 0);
         return;
     }
-    oc->opened = 1;
-    mciSendStringA("play " MCI_ALIAS, NULL, 0, NULL);
+    DeleteFileA(tmp); Mem_Free(tmp);
+
+    /* Open the chosen output device (AUDIO_DEV_DEFAULT == WAVE_MAPPER). */
+    if (waveOutOpen(&oc->hwo, Audio_DeviceId(), &fmt, 0, 0, CALLBACK_NULL)
+            != MMSYSERR_NOERROR) {
+        oc->hwo = NULL;
+        Mem_Free(pcm);
+        oc->speaking = 0;
+        if (oc->notify) PostMessageA(oc->notify, WM_SA_DONE, 0, 0);
+        return;
+    }
+    oc->playPcm = pcm;
+    ZeroMemory(&oc->whdr, sizeof(oc->whdr));
+    oc->whdr.lpData         = (LPSTR)pcm;
+    oc->whdr.dwBufferLength = pcmLen;
+    oc->paused = 0;
+    if (waveOutPrepareHeader(oc->hwo, &oc->whdr, sizeof(oc->whdr)) != MMSYSERR_NOERROR ||
+        waveOutWrite(oc->hwo, &oc->whdr, sizeof(oc->whdr)) != MMSYSERR_NOERROR) {
+        StopWaveOut(oc);   /* frees pcm too */
+        oc->speaking = 0;
+        if (oc->notify) PostMessageA(oc->notify, WM_SA_DONE, 0, 0);
+        return;
+    }
     th = CreateThread(NULL, 0, PollThread, (LPVOID)(INT_PTR)gen, 0, NULL);
     if (th) CloseHandle(th);
 }
@@ -467,7 +490,7 @@ static void OC_Shutdown(SpeechEngine *e)
     /* Tear the worker down first so it stops using oc->synth before we release
      * it (otherwise: use-after-free). */
     InterlockedIncrement(&oc->playGen);
-    CloseMci(oc);
+    StopWaveOut(oc);
     if (oc->workerReady) {
         oc->quit = 1;
         SetEvent(oc->reqEvent);
@@ -479,7 +502,6 @@ static void OC_Shutdown(SpeechEngine *e)
         oc->workerReady = 0;
     }
     oc->speaking = 0;
-    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL; }
     if (oc->list) {
         for (i = 0; i < oc->count; i++) {
             IVoiceInfo *vi = (IVoiceInfo *)oc->list[i].data;
@@ -541,7 +563,7 @@ static BOOL OC_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
     oc->playGen++;
     LeaveCriticalSection(&oc->reqCs);
 
-    CloseMci(oc);          /* stop any current audio now (UI thread owns MCI) */
+    StopWaveOut(oc);       /* stop any current audio now (UI thread owns it) */
     oc->speaking = 1;
     SetEvent(oc->reqEvent);
     return TRUE;
@@ -550,23 +572,26 @@ static BOOL OC_Speak(SpeechEngine *e, const char *text, BOOL asXml, HWND notify)
 static BOOL OC_Pause(SpeechEngine *e)
 {
     OneCore *oc = (OneCore *)e->priv;
-    if (!oc->opened) return FALSE;
-    return mciSendStringA("pause " MCI_ALIAS, NULL, 0, NULL) == 0;
+    if (!oc->hwo || oc->paused) return FALSE;
+    if (waveOutPause(oc->hwo) != MMSYSERR_NOERROR) return FALSE;
+    oc->paused = 1;
+    return TRUE;
 }
 
 static BOOL OC_Resume(SpeechEngine *e)
 {
     OneCore *oc = (OneCore *)e->priv;
-    if (!oc->opened) return FALSE;
-    return mciSendStringA("resume " MCI_ALIAS, NULL, 0, NULL) == 0;
+    if (!oc->hwo || !oc->paused) return FALSE;
+    if (waveOutRestart(oc->hwo) != MMSYSERR_NOERROR) return FALSE;
+    oc->paused = 0;
+    return TRUE;
 }
 
 static BOOL OC_Stop(SpeechEngine *e)
 {
     OneCore *oc = (OneCore *)e->priv;
     InterlockedIncrement(&oc->playGen);   /* supersede worker + poll thread */
-    CloseMci(oc);                          /* stop the audio immediately      */
-    if (oc->tempWav) { DeleteFileA(oc->tempWav); Mem_Free(oc->tempWav); oc->tempWav = NULL; }
+    StopWaveOut(oc);                       /* stop the audio immediately      */
     oc->speaking = 0;
     return TRUE;
 }

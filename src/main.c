@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <mmsystem.h>
 
 #include "resource.h"
 #include "engine.h"
@@ -1798,6 +1799,107 @@ static void RegGetStr(HKEY k, const char *name, char *buf, DWORD len)
 }
 static int ClampI(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+/* ---- audio output device -------------------------------------------------
+ * Every engine reads Audio_DeviceId() when it opens its output.  The choice is
+ * remembered by NAME (a waveOut index can shift as devices come and go) and
+ * resolved to a live index on demand; a blank name means the system default. */
+static HMENU g_audioMenu = NULL;      /* the "Audio Output Device" submenu */
+static char  g_audioDevName[40];      /* chosen device name, "" = default  */
+
+/* Match the remembered name against the devices present now and publish the
+ * resulting index (or default) for the engines. */
+static void AudioDeviceResolve(void)
+{
+    UINT n, i;
+    Audio_SetDeviceId(AUDIO_DEV_DEFAULT);
+    if (g_audioDevName[0] == 0) return;
+    n = waveOutGetNumDevs();
+    for (i = 0; i < n; i++) {
+        WAVEOUTCAPSA caps;
+        if (waveOutGetDevCapsA(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR &&
+            lstrcmpiA(g_audioDevName, caps.szPname) == 0) {
+            Audio_SetDeviceId(i);
+            return;
+        }
+    }
+    /* Not present just now: stay on the default until it comes back. */
+}
+
+/* Rebuild the submenu from the devices present now, ticking the current one. */
+static void AudioMenuBuild(void)
+{
+    UINT n, i, cur;
+    if (!g_audioMenu) return;
+    AudioDeviceResolve();
+    cur = Audio_DeviceId();
+    while (GetMenuItemCount(g_audioMenu) > 0) DeleteMenu(g_audioMenu, 0, MF_BYPOSITION);
+    AppendMenuA(g_audioMenu, MF_STRING | (cur == AUDIO_DEV_DEFAULT ? MF_CHECKED : 0),
+                IDM_AUDIODEV_BASE, "&Default (system's choice)");
+    n = waveOutGetNumDevs();
+    for (i = 0; i < n && i < IDM_AUDIODEV_MAX - 1; i++) {
+        WAVEOUTCAPSA caps;
+        if (waveOutGetDevCapsA(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+            AppendMenuA(g_audioMenu, MF_STRING | (cur == i ? MF_CHECKED : 0),
+                        IDM_AUDIODEV_BASE + 1 + i, caps.szPname);
+    }
+}
+
+/* Push a just-picked device to the running engine.  SAPI 5 rebinds on its next
+ * Speak and OneCore reopens on its next play, so they need nothing here; SAPI 4
+ * binds its device when a voice is selected, so re-select to move it now. */
+static void AudioApplyToEngine(void)
+{
+    if (!g_engine || g_speaking || g_saving) return;
+    if (lstrcmpA(g_engine->id, "sapi4") == 0 && g_engine->SetVoice) {
+        int sel = (int)SendMessageA(g_voice, CB_GETCURSEL, 0, 0);
+        if (sel >= 0) {
+            int idx = (int)SendMessageA(g_voice, CB_GETITEMDATA, sel, 0);
+            if (idx >= 0) g_engine->SetVoice(g_engine, idx);
+        }
+    }
+}
+
+/* Handle a device menu choice: remember it (blank = default), persist, apply. */
+static void AudioDevicePick(int cmd)
+{
+    HKEY k;
+    int  slot = cmd - IDM_AUDIODEV_BASE;   /* 0 = default, else device slot-1 */
+    if (slot <= 0) {
+        g_audioDevName[0] = 0;
+    } else {
+        WAVEOUTCAPSA caps;
+        if (waveOutGetDevCapsA((UINT)(slot - 1), &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+            return;
+        lstrcpynA(g_audioDevName, caps.szPname, sizeof(g_audioDevName));
+    }
+    AudioDeviceResolve();
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, SA_REGKEY, 0, NULL, 0, KEY_SET_VALUE,
+                        NULL, &k, NULL) == ERROR_SUCCESS) {
+        RegSetStr(k, "AudioDevice", g_audioDevName);
+        RegCloseKey(k);
+    }
+    AudioApplyToEngine();
+    if (g_audioDevName[0]) {
+        char msg[80];
+        wsprintfA(msg, "Audio output: %s", g_audioDevName);
+        SetStatus(msg);
+    } else {
+        SetStatus("Audio output: default device");
+    }
+}
+
+/* Create the (empty) submenu and hang it in the Speech menu; resolve the saved
+ * choice.  Called once at start-up after the menu is loaded. */
+static void AudioMenuInit(void)
+{
+    HMENU speech = GetSubMenu(g_menu, 1);   /* File = 0, Speech = 1 */
+    g_audioMenu = CreatePopupMenu();
+    if (speech && g_audioMenu)
+        InsertMenuA(speech, IDM_HIGHLIGHT, MF_BYCOMMAND | MF_POPUP | MF_STRING,
+                    (UINT_PTR)g_audioMenu, "Audio Output &Device");
+    AudioDeviceResolve();
+}
+
 static void LoadSettings(void)
 {
     HKEY k;
@@ -1818,6 +1920,7 @@ static void LoadSettings(void)
     g_loadVol   = ClampI((int)RegGetDword(k, "Volume", VOL_DEF),   VOL_MIN,   VOL_MAX);
     RegGetStr(k, "Engine", g_loadEngine, sizeof(g_loadEngine));
     RegGetStr(k, "Voice",  g_loadVoice,  sizeof(g_loadVoice));
+    RegGetStr(k, "AudioDevice", g_audioDevName, sizeof(g_audioDevName));
     RegCloseKey(k);
 }
 
@@ -2187,6 +2290,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_modified = TRUE;   /* unsaved text (for the exit prompt) */
             return 0;
         }
+        if (id >= IDM_AUDIODEV_BASE && id < IDM_AUDIODEV_BASE + IDM_AUDIODEV_MAX) {
+            AudioDevicePick(id);
+            return 0;
+        }
         switch (id) {
         case IDC_SPEAK: case IDM_SPEAK: DoSpeak();     return 0;
         case IDC_PAUSE: case IDM_PAUSE: DoPlayPause();  return 0;
@@ -2260,6 +2367,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SA_S4NEXT:               /* SAPI 4 finished a chunk - feed the next */
         Sapi4_SpeakNextChunk((long)wp);
         return 0;
+
+    case WM_INITMENUPOPUP:
+        /* Fill the Audio Output Device submenu with the devices present now. */
+        if ((HMENU)wp == g_audioMenu) AudioMenuBuild();
+        break;   /* let DefWindowProc do the standard menu init too */
+    case WM_DEVICECHANGE:
+        AudioDeviceResolve();   /* an output device may have come or gone */
+        break;
 
     case WM_SA_WORD:
         if (g_highlight) HighlightWord((int)wp, (int)lp);
@@ -2372,6 +2487,7 @@ int SpeakaliveMain(void)
     RegisterClassExA(&wc);
 
     g_menu = LoadMenuA(g_inst, MAKEINTRESOURCEA(IDR_MENU));
+    AudioMenuInit();   /* add the Audio Output Device submenu, resolve the saved choice */
 
     g_main = CreateWindowExA(0, APP_CLASS, APP_TITLE,
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,

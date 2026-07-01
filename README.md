@@ -2,7 +2,7 @@
 
 At the speed of light and with the spirit of the community, the Speakonia phoenix flies again
 
-Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The entire program is a single, self-contained executable file of 56 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
+Speakalive is a lightweight, fully accessible text-to-speech program for Windows that puts blind and visually impaired users first. You type or paste some text, pick a voice, and Speakalive reads it aloud or saves it to an audio file. It features a graphical user interface (GUI) that is easy to drive from the keyboard with on-screen elements that are clearly labelled for screen readers such as [NVDA](https://nvaccess.org/about-nvda/) and [JAWS](https://www.freedomscientific.com/products/software/jaws/). A dark mode that follows your system, and word-by-word follow-along highlighting are all included. The entire program is a single, self-contained executable file of 32.5 kilobytes that runs on every version of Windows from Windows 2000 through Windows 11, with no runtime or installer to fight with.
 
 Speakalive aims to be a revival of Speakonia by CFS-Technologies, the little program that served as many people's gateway into creating text-to-speech content, with notable examples being [Thunderbirds101](https://www.youtube.com/Thunderbirds101) and AT88TV. It is also inspired by [Balabolka](https://www.cross-plus-a.com/balabolka.htm).
 
@@ -70,6 +70,14 @@ You can also use the Speech menu, which lists every action together with its sho
 ## Adjusting rate, pitch and volume
 
 Below the text box are sliders for Rate and Pitch, and on SAPI 5, Volume. Tab to a slider and use the arrow keys, Page Up / Page Down, or Home / End to change it. The current value is shown beside each slider. Rate and Pitch read out as a signed number where 0 is the engine's normal setting; Volume reads as a percentage. Press the Reset Sliders button (Alt + E), or choose Speech then Reset Sliders, to put rate and pitch back to normal and volume back to 100 percent.
+
+## Choosing the audio output device
+
+By default Speakalive speaks through whatever Windows is using as its main output device, but you can send its speech to a specific device instead, such as a particular set of speakers, headphones, or a virtual audio cable.
+
+Choose Speech then Audio Output Device to open a submenu listing Default (system's choice) followed by every output device on your computer. A bullet or tick marks the one in use. Arrow to the device you want and press Enter. Your choice is remembered between sessions and takes effect the next time you speak.
+
+The setting applies to all three engines, SAPI 4, SAPI 5, and OneCore. It is remembered by the device's name, so if you unplug the device and plug it back in, or move your settings to another PC, Speakalive finds it again; while a chosen device is absent, speech falls back to the default so you are never left with silence. The list refreshes each time you open it, so devices you plug in while Speakalive is running appear straight away.
 
 ## Markup: control tags and XML
 

@@ -16,11 +16,11 @@ rem  Properties -> Details (version, description, copyright, and so on).
 rem  Avoid the characters & < > | ^ in the text values.
 rem ===================================================================
 set VER_MAJOR=2002
-set VER_MINOR=1
-set VER_PATCH=6
+set VER_MINOR=2
+set VER_PATCH=0
 set VER_BUILD=0
 rem Version string shown in Help -> About Speakalive (edit freely).
-set "VERSION=2002.1.6"
+set "VERSION=2002.2.0"
 set "PRODUCT_NAME=Speakalive"
 set "FILE_DESC=Speakalive text-to-speech"
 set "COMPANY=Seediffusion"

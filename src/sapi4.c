@@ -88,6 +88,7 @@ typedef struct {
     int     rate;     /* -10..10 */
     int     pitch;    /* -10..10 */
     int     speaking;
+    int     paused;     /* AudioPause in effect: ignore chunk-end callbacks */
     int     curVoice;   /* index currently selected */
     /* Live (F5) chunked speaking: the text is fed to the engine one chunk at a
      * time, the next queued when the previous finishes (SAPI 4 chokes on one
@@ -312,6 +313,11 @@ static BOOL DoSelect(Sapi4 *s, int index)
      * Select with a NULL dest. */
     CoCreateInstance(&GUID_MMAudioDest, NULL, CLSCTX_ALL,
                      &GUID_IAudioMMDevice, (void **)&s->audio);
+    /* Route to the chosen wave-out device (the dest defaults to the system one).
+     * The device is fixed at Select time, so the UI re-selects the voice when the
+     * user picks a different device. */
+    if (s->audio && Audio_DeviceId() != AUDIO_DEV_DEFAULT)
+        s->audio->lpVtbl->DeviceNumSet(s->audio, Audio_DeviceId());
 
     hr = s->enumr->lpVtbl->Select(s->enumr, s->modes[index], &s->central,
                                   (LPUNKNOWN)s->audio);
@@ -497,6 +503,7 @@ static BOOL S4_Speak(SpeechEngine *eng, const char *text, BOOL asXml, HWND notif
         if (!s->speakChunk) { Mem_Free(w); return FALSE; }
     }
 
+    s->central->lpVtbl->AudioResume(s->central); /* clear any pause so new speech plays */
     s->central->lpVtbl->AudioReset(s->central);  /* stop anything in progress */
     s->speakGen++;                               /* drop stale chunk callbacks */
     if (s->speakText) Mem_Free(s->speakText);
@@ -505,6 +512,7 @@ static BOOL S4_Speak(SpeechEngine *eng, const char *text, BOOL asXml, HWND notif
     s->speakTotal  = lstrlenW(w);
     s->speakNotify = notify;
     s->speaking    = 1;
+    s->paused      = 0;
     S4_FeedChunk(s);                             /* kick off the first chunk  */
     return TRUE;
 }
@@ -514,19 +522,28 @@ static BOOL S4_Speak(SpeechEngine *eng, const char *text, BOOL asXml, HWND notif
 void Sapi4_SpeakNextChunk(long gen)
 {
     Sapi4 *s = &g_s4;
-    if (s->speaking && gen == s->speakGen) S4_FeedChunk(s);
+    /* Ignore chunk-end callbacks while paused: AudioPause makes the engine fire
+     * an AudioStop, and feeding "the next chunk" then would either skip ahead or,
+     * for short single-chunk text, signal WM_SA_DONE - which drops g_speaking and
+     * makes a resume (F6) restart from the beginning.  The real next chunk is fed
+     * when playback truly ends after a resume. */
+    if (s->speaking && !s->paused && gen == s->speakGen) S4_FeedChunk(s);
 }
 
 static BOOL S4_Pause(SpeechEngine *eng)
 {
     Sapi4 *s = (Sapi4 *)eng->priv;
-    return s->central ? SUCCEEDED(s->central->lpVtbl->AudioPause(s->central)) : FALSE;
+    if (!s->central) return FALSE;
+    s->paused = 1;    /* set before AudioPause so the AudioStop it may fire is ignored */
+    return SUCCEEDED(s->central->lpVtbl->AudioPause(s->central));
 }
 
 static BOOL S4_Resume(SpeechEngine *eng)
 {
     Sapi4 *s = (Sapi4 *)eng->priv;
-    return s->central ? SUCCEEDED(s->central->lpVtbl->AudioResume(s->central)) : FALSE;
+    if (!s->central) return FALSE;
+    s->paused = 0;
+    return SUCCEEDED(s->central->lpVtbl->AudioResume(s->central));
 }
 
 static BOOL S4_Stop(SpeechEngine *eng)
@@ -534,6 +551,7 @@ static BOOL S4_Stop(SpeechEngine *eng)
     Sapi4 *s = (Sapi4 *)eng->priv;
     if (!s->central) return FALSE;
     s->speaking = 0;
+    s->paused   = 0;
     s->speakGen++;                               /* drop pending chunk callbacks */
     if (s->speakText) { Mem_Free(s->speakText); s->speakText = NULL; }
     return SUCCEEDED(s->central->lpVtbl->AudioReset(s->central));

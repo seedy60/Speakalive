@@ -6,6 +6,11 @@
  * render; each engine polls it inside its render loop. */
 volatile long g_saveCancel = 0;
 
+/* Chosen audio output device (see engine.h).  Default until the UI sets it. */
+static UINT g_audioDev = AUDIO_DEV_DEFAULT;
+UINT Audio_DeviceId(void)      { return g_audioDev; }
+void Audio_SetDeviceId(UINT id){ g_audioDev = id; }
+
 static SpeechEngine *g_list[4];
 static int           g_count;
 

@@ -80,6 +80,13 @@ void          Engines_ShutdownAll(void);
  * this in their render loops and return FALSE when it is raised. */
 extern volatile long g_saveCancel;
 
+/* Chosen audio output device, shared by every engine: a waveOut device index,
+ * or AUDIO_DEV_DEFAULT (== WAVE_MAPPER) for "let the system decide".  The UI
+ * sets it; each engine reads it when it binds/opens its output. */
+#define AUDIO_DEV_DEFAULT ((UINT)-1)
+UINT Audio_DeviceId(void);
+void Audio_SetDeviceId(UINT id);
+
 /* Notifications sent to the UI's notify window. */
 #define WM_SA_BASE        (WM_APP + 100)
 #define WM_SA_WORD        (WM_SA_BASE + 0)  /* wParam=start, lParam=length     */
